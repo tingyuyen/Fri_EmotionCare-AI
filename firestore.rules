@@ -1,0 +1,150 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default Deny All Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper Functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'tingyu19980928@gmail.com' ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'admin')
+      );
+    }
+
+    function isTeacher() {
+      return isSignedIn() && (
+        isAdmin() ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'teacher')
+      );
+    }
+
+    function isTeacherOfClass(classId) {
+      return isSignedIn() && (
+        isAdmin() ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'teacher' && getUserData().classId == classId)
+      );
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // 1. Users Collection
+    match /users/{userId} {
+      allow read: if isSignedIn() && (
+        isOwner(userId) ||
+        isTeacher() ||
+        isAdmin()
+      );
+      
+      allow create: if isSignedIn() && isValidId(userId) && (
+        (isOwner(userId) && request.resource.data.role == 'student') ||
+        isAdmin()
+      );
+
+      allow update: if isSignedIn() && isValidId(userId) && (
+        isAdmin() ||
+        (isOwner(userId) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'id']))
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // 2. Classes Collection
+    match /classes/{classId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // 3. Mood Logs Collection
+    match /mood_logs/{logId} {
+      allow read: if isSignedIn() && (
+        resource.data.studentId == request.auth.uid ||
+        isTeacherOfClass(resource.data.classId) ||
+        isAdmin()
+      );
+
+      allow create: if isSignedIn() && isValidId(logId) && (
+        request.resource.data.studentId == request.auth.uid &&
+        request.resource.data.score >= 1 &&
+        request.resource.data.score <= 5 &&
+        request.resource.data.mood in ['happy', 'calm', 'anxious', 'sad', 'angry', 'tired']
+      );
+
+      allow update: if isSignedIn() && isValidId(logId) && (
+        resource.data.studentId == request.auth.uid &&
+        request.resource.data.studentId == request.auth.uid
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // 4. Care Notes Collection (Confidential: Teachers & Admins Only)
+    match /care_notes/{noteId} {
+      allow read: if isSignedIn() && (
+        isTeacherOfClass(resource.data.classId) ||
+        isAdmin()
+      );
+      allow create: if isSignedIn() && (
+        isTeacherOfClass(request.resource.data.classId) ||
+        isAdmin()
+      );
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        (getUserData().role == 'teacher' && resource.data.teacherId == request.auth.uid)
+      );
+      allow delete: if isAdmin();
+    }
+
+    // 5. Chat Messages Collection (AI companion chats)
+    // Teacher can ONLY view student chat if teacher belongs to the same class!
+    // Students can ONLY view their own chat!
+    // Raw chat content cannot be edited by teachers or students (immutability)
+    match /chat_messages/{messageId} {
+      allow read: if isSignedIn() && (
+        resource.data.studentId == request.auth.uid ||
+        isTeacherOfClass(resource.data.classId) ||
+        isAdmin()
+      );
+
+      allow create: if isSignedIn() && isValidId(messageId) && (
+        request.resource.data.studentId == request.auth.uid
+      );
+
+      // Raw messages are immutable - cannot be updated by anyone
+      allow update: if false;
+
+      // Admin can delete messages for data retention or student privacy requests
+      allow delete: if isAdmin();
+    }
+
+    // 6. Chat Access Audit Logs (Recording when a teacher views student transcripts)
+    match /chat_access_logs/{logId} {
+      allow read: if isSignedIn() && (isTeacher() || isAdmin());
+      allow create: if isSignedIn() && (isTeacher() || isAdmin()) && isValidId(logId);
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+
+    // 7. Connection Health Check
+    match /test/{testId} {
+      allow read: if true;
+    }
+  }
+}

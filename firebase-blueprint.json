@@ -1,0 +1,342 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "校園使用者基本帳號資料，支援學生、教師、管理員三種角色",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "使用者唯一 ID (Firebase Auth UID)",
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "description": "電子信箱",
+          "maxLength": 128
+        },
+        "displayName": {
+          "type": "string",
+          "description": "姓名或暱稱",
+          "maxLength": 64
+        },
+        "role": {
+          "type": "string",
+          "description": "使用者角色權限",
+          "enum": ["student", "teacher", "admin"]
+        },
+        "grade": {
+          "type": "string",
+          "description": "所屬年級 (例如: 三年級)",
+          "maxLength": 20
+        },
+        "classId": {
+          "type": "string",
+          "description": "所屬班級代碼",
+          "maxLength": 64
+        },
+        "studentNumber": {
+          "type": "string",
+          "description": "學生座號或學號",
+          "maxLength": 20
+        },
+        "avatar": {
+          "type": "string",
+          "description": "代表頭像識別碼",
+          "maxLength": 64
+        },
+        "status": {
+          "type": "string",
+          "description": "帳號啟用狀態 (active 正常啟用 / disabled 停用)",
+          "enum": ["active", "disabled"]
+        },
+        "passwordSet": {
+          "type": "boolean",
+          "description": "密碼是否已完成設定"
+        },
+        "needsActivation": {
+          "type": "boolean",
+          "description": "若教師尚未設定密碼，需完成安全啟用流程方可登入"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "建立時間戳記"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "更新時間戳記"
+        }
+      },
+      "required": ["id", "displayName", "role"]
+    },
+    "SchoolClass": {
+      "title": "SchoolClass",
+      "description": "班級資料定義",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "班級唯一識別碼",
+          "maxLength": 64
+        },
+        "name": {
+          "type": "string",
+          "description": "班級名稱 (例如: 三年二班)",
+          "maxLength": 50
+        },
+        "grade": {
+          "type": "string",
+          "description": "年級",
+          "maxLength": 20
+        },
+        "teacherId": {
+          "type": "string",
+          "description": "班級導師 UID",
+          "maxLength": 128
+        },
+        "teacherName": {
+          "type": "string",
+          "description": "班級導師姓名",
+          "maxLength": 64
+        },
+        "studentCount": {
+          "type": "number",
+          "description": "班級學生人數"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "建立時間"
+        }
+      },
+      "required": ["id", "name", "grade", "teacherId"]
+    },
+    "MoodLog": {
+      "title": "MoodLog",
+      "description": "學生每日心情簽到與情緒溫度計紀錄",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "心情紀錄代碼",
+          "maxLength": 128
+        },
+        "studentId": {
+          "type": "string",
+          "description": "學生 UID",
+          "maxLength": 128
+        },
+        "studentName": {
+          "type": "string",
+          "description": "學生姓名",
+          "maxLength": 64
+        },
+        "classId": {
+          "type": "string",
+          "description": "所屬班級代碼",
+          "maxLength": 64
+        },
+        "mood": {
+          "type": "string",
+          "description": "心情類型 (開心、平靜、焦慮、難過、生氣、疲憊)",
+          "enum": ["happy", "calm", "anxious", "sad", "angry", "tired"]
+        },
+        "score": {
+          "type": "number",
+          "description": "心情溫度分數 1-5 分"
+        },
+        "note": {
+          "type": "string",
+          "description": "心情小日記內容",
+          "maxLength": 500
+        },
+        "date": {
+          "type": "string",
+          "description": "日期 YYYY-MM-DD",
+          "maxLength": 10
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "紀錄建立時間"
+        }
+      },
+      "required": ["id", "studentId", "classId", "mood", "score", "date"]
+    },
+    "CareNote": {
+      "title": "CareNote",
+      "description": "教師或輔導老師填寫的學生關懷追蹤紀錄",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "關懷筆記識別碼",
+          "maxLength": 128
+        },
+        "studentId": {
+          "type": "string",
+          "description": "學生 UID",
+          "maxLength": 128
+        },
+        "studentName": {
+          "type": "string",
+          "description": "學生姓名",
+          "maxLength": 64
+        },
+        "classId": {
+          "type": "string",
+          "description": "班級代碼",
+          "maxLength": 64
+        },
+        "teacherId": {
+          "type": "string",
+          "description": "紀錄教師 UID",
+          "maxLength": 128
+        },
+        "teacherName": {
+          "type": "string",
+          "description": "紀錄教師姓名",
+          "maxLength": 64
+        },
+        "alertLevel": {
+          "type": "string",
+          "description": "關注等級: 一般觀察(normal)、需要關懷(attention)、高度預警(urgent)",
+          "enum": ["normal", "attention", "urgent"]
+        },
+        "content": {
+          "type": "string",
+          "description": "關懷內容與觀察細節",
+          "maxLength": 1000
+        },
+        "actionTaken": {
+          "type": "string",
+          "description": "已採取的關懷措施 (例如: 晤談、通知家長、通報輔導處)",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "建立時間"
+        }
+      },
+      "required": ["id", "studentId", "teacherId", "alertLevel", "content"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "學生與 AI 心靈小夥伴的聊天紀錄",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "訊息識別碼",
+          "maxLength": 128
+        },
+        "studentId": {
+          "type": "string",
+          "description": "學生 UID",
+          "maxLength": 128
+        },
+        "studentName": {
+          "type": "string",
+          "description": "學生姓名",
+          "maxLength": 64
+        },
+        "classId": {
+          "type": "string",
+          "description": "學生所屬班級代碼",
+          "maxLength": 64
+        },
+        "sender": {
+          "type": "string",
+          "description": "發言者身分 (student 或 ai)",
+          "enum": ["student", "ai"]
+        },
+        "text": {
+          "type": "string",
+          "description": "對話內容",
+          "maxLength": 2000
+        },
+        "emotionTag": {
+          "type": "string",
+          "description": "AI 識別的情緒標籤",
+          "maxLength": 30
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "訊息時間"
+        }
+      },
+      "required": ["id", "studentId", "sender", "text"]
+    },
+    "ChatAccessLog": {
+      "title": "ChatAccessLog",
+      "description": "教師查閱學生 AI 對話紀錄之稽核日誌",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "稽核紀錄代碼",
+          "maxLength": 128
+        },
+        "teacherId": {
+          "type": "string",
+          "description": "查閱教師 UID",
+          "maxLength": 128
+        },
+        "teacherName": {
+          "type": "string",
+          "description": "查閱教師姓名",
+          "maxLength": 64
+        },
+        "studentId": {
+          "type": "string",
+          "description": "被查閱學生 UID",
+          "maxLength": 128
+        },
+        "studentName": {
+          "type": "string",
+          "description": "被查閱學生姓名",
+          "maxLength": 64
+        },
+        "classId": {
+          "type": "string",
+          "description": "班級代碼",
+          "maxLength": 64
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "查閱時間戳記"
+        },
+        "purpose": {
+          "type": "string",
+          "description": "查閱原因或輔導目的",
+          "maxLength": 300
+        }
+      },
+      "required": ["id", "teacherId", "studentId", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "校園使用者個人檔案資料"
+    },
+    "/classes/{classId}": {
+      "schema": "SchoolClass",
+      "description": "班級資料"
+    },
+    "/mood_logs/{logId}": {
+      "schema": "MoodLog",
+      "description": "每日心情簽到紀錄集合"
+    },
+    "/care_notes/{noteId}": {
+      "schema": "CareNote",
+      "description": "教師輔導關懷紀錄"
+    },
+    "/chat_messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "AI 聊天室對話歷史"
+    },
+    "/chat_access_logs/{logId}": {
+      "schema": "ChatAccessLog",
+      "description": "教師查看 AI 對話之安全稽核紀錄"
+    }
+  }
+}
