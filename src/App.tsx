@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
 import { Navbar } from './components/Navbar';
+import { AuthGate } from './components/AuthGate';
 import { StudentPortal } from './components/StudentPortal/StudentPortal';
 import { TeacherDashboard } from './components/TeacherPortal/TeacherDashboard';
 import { AdminDashboard } from './components/AdminPortal/AdminDashboard';
@@ -9,74 +10,114 @@ import {
   GraduationCap,
   UserCheck,
   Sparkles,
-  Heart,
   Shield,
-  HelpCircle,
   PhoneCall,
-  Info,
+  FlaskConical,
 } from 'lucide-react';
 
 const MainLayout: React.FC = () => {
-  const { currentUser, setCurrentUser, users } = useApp();
+  const {
+    appMode,
+    currentUser,
+    firebaseUser,
+    authLoading,
+    profileLoading,
+    accountBlockedReason,
+    setSandboxUser,
+    exitSandboxMode,
+    users,
+  } = useApp();
   const [isFirebaseGuideOpen, setIsFirebaseGuideOpen] = useState(false);
 
-  // Quick switch helpers
-  const student = users.find((u) => u.role === 'student') || users[0];
-  const teacher = users.find((u) => u.role === 'teacher') || users[0];
-  const admin = users.find((u) => u.role === 'admin') || users[0];
+  // Enforce AuthGate in Cloud mode whenever not fully authenticated, verified, and onboarded
+  const needsAuthGate =
+    appMode === 'cloud' &&
+    (authLoading ||
+      profileLoading ||
+      !firebaseUser ||
+      !firebaseUser.emailVerified ||
+      !currentUser ||
+      Boolean(accountBlockedReason) ||
+      (currentUser.role === 'teacher' && Boolean(currentUser.needsActivation)));
+
+  if (needsAuthGate) {
+    return <AuthGate />;
+  }
+
+  if (!currentUser) {
+    return <AuthGate />;
+  }
+
+  // Sandbox quick-switch helpers (ONLY used when appMode === 'sandbox')
+  const sandboxStudent = users.find((u) => u.role === 'student') || users[0];
+  const sandboxTeacher = users.find((u) => u.role === 'teacher') || users[0];
+  const sandboxAdmin = users.find((u) => u.role === 'admin') || users[0];
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-800">
       {/* Top Navbar */}
       <Navbar onOpenFirebaseGuide={() => setIsFirebaseGuideOpen(true)} />
 
-      {/* Role Navigation Bar for Instant Preview Testing */}
-      <section className="bg-gradient-to-r from-teal-600 via-teal-700 to-emerald-700 text-white shadow-sm py-3 px-4 sm:px-8">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <span className="text-xs bg-white/20 backdrop-blur-xs px-2.5 py-1 rounded-full font-bold text-white flex items-center gap-1">
-              <Sparkles className="w-3.5 h-3.5 text-teal-200" /> 系統預覽測試模式
-            </span>
-            <span className="text-xs text-teal-100 hidden md:inline">
-              點擊右側按鈕可立即切換為不同身重視角：
-            </span>
-          </div>
+      {/* Sandbox Banner (Strictly hidden in Production Cloud Mode!) */}
+      {appMode === 'sandbox' && (
+        <section className="bg-gradient-to-r from-amber-600 via-teal-700 to-emerald-700 text-white shadow-sm py-3 px-4 sm:px-8">
+          <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-xs bg-white/20 backdrop-blur-xs px-2.5 py-1 rounded-full font-bold text-white flex items-center gap-1">
+                <FlaskConical className="w-3.5 h-3.5 text-amber-200" /> 離線體驗沙盒模式（不寫入雲端）
+              </span>
+              <span className="text-xs text-teal-100 hidden md:inline">
+                點擊右側按鈕可體驗模擬身分：
+              </span>
+            </div>
 
-          {/* Quick Role Tab Buttons */}
-          <div className="flex items-center gap-1.5 bg-black/15 p-1 rounded-xl backdrop-blur-xs text-xs font-bold">
-            <button
-              onClick={() => setCurrentUser(student)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-                currentUser.role === 'student'
-                  ? 'bg-white text-teal-900 shadow-sm'
-                  : 'text-white/80 hover:text-white hover:bg-white/10'
-              }`}
-            >
-              <GraduationCap className="w-3.5 h-3.5" /> 學生端體驗
-            </button>
-            <button
-              onClick={() => setCurrentUser(teacher)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-                currentUser.role === 'teacher'
-                  ? 'bg-white text-teal-900 shadow-sm'
-                  : 'text-white/80 hover:text-white hover:bg-white/10'
-              }`}
-            >
-              <UserCheck className="w-3.5 h-3.5" /> 教師端 Dashboard
-            </button>
-            <button
-              onClick={() => setCurrentUser(admin)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-                currentUser.role === 'admin'
-                  ? 'bg-white text-teal-900 shadow-sm'
-                  : 'text-white/80 hover:text-white hover:bg-white/10'
-              }`}
-            >
-              <Sparkles className="w-3.5 h-3.5" /> 管理員端
-            </button>
+            <div className="flex items-center gap-1.5 bg-black/15 p-1 rounded-xl backdrop-blur-xs text-xs font-bold">
+              {sandboxStudent && (
+                <button
+                  onClick={() => setSandboxUser(sandboxStudent)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
+                    currentUser.role === 'student'
+                      ? 'bg-white text-teal-900 shadow-sm'
+                      : 'text-white/80 hover:text-white hover:bg-white/10'
+                  }`}
+                >
+                  <GraduationCap className="w-3.5 h-3.5" /> 學生端體驗
+                </button>
+              )}
+              {sandboxTeacher && (
+                <button
+                  onClick={() => setSandboxUser(sandboxTeacher)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
+                    currentUser.role === 'teacher'
+                      ? 'bg-white text-teal-900 shadow-sm'
+                      : 'text-white/80 hover:text-white hover:bg-white/10'
+                  }`}
+                >
+                  <UserCheck className="w-3.5 h-3.5" /> 教師端體驗
+                </button>
+              )}
+              {sandboxAdmin && (
+                <button
+                  onClick={() => setSandboxUser(sandboxAdmin)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
+                    currentUser.role === 'admin'
+                      ? 'bg-white text-teal-900 shadow-sm'
+                      : 'text-white/80 hover:text-white hover:bg-white/10'
+                  }`}
+                >
+                  <Sparkles className="w-3.5 h-3.5" /> 管理員端體驗
+                </button>
+              )}
+              <button
+                onClick={exitSandboxMode}
+                className="px-3 py-1.5 rounded-lg bg-white/15 hover:bg-white/25 text-white text-xs font-bold"
+              >
+                返回真實登入
+              </button>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* Main View Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
@@ -103,19 +144,18 @@ const MainLayout: React.FC = () => {
             </span>
             <span className="flex items-center gap-1">
               <PhoneCall className="w-3.5 h-3.5 text-rose-500" />
-              教育部校園安心專線 1925
+              衛福部安心專線 1925 · 保護專線 113
             </span>
             <button
               onClick={() => setIsFirebaseGuideOpen(true)}
               className="text-teal-700 hover:underline font-semibold"
             >
-              Firebase 設定與發布指南
+              Firebase 與系統架構說明
             </button>
           </div>
         </div>
       </footer>
 
-      {/* Firebase & Cloud Deployment Guide Modal */}
       <FirebaseGuideModal
         isOpen={isFirebaseGuideOpen}
         onClose={() => setIsFirebaseGuideOpen(false)}

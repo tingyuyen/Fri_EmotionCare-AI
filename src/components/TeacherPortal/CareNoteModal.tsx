@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { User } from '../../types';
-import { X, ShieldAlert, CheckCircle, FileText, Heart } from 'lucide-react';
+import { X, CheckCircle, AlertTriangle } from 'lucide-react';
 
 interface CareNoteModalProps {
   isOpen: boolean;
@@ -14,28 +14,39 @@ export const CareNoteModal: React.FC<CareNoteModalProps> = ({ isOpen, onClose, s
   const [alertLevel, setAlertLevel] = useState<'normal' | 'attention' | 'urgent'>('attention');
   const [content, setContent] = useState('');
   const [actionTaken, setActionTaken] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [isSaved, setIsSaved] = useState(false);
 
-  if (!isOpen || !student) return null;
+  if (!isOpen || !student || !currentUser) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!content.trim()) return;
+    if (!content.trim() || isSaving) return;
 
-    addCareNote(student.id, alertLevel, content, actionTaken);
-    setIsSaved(true);
-    setTimeout(() => {
-      setIsSaved(false);
-      setContent('');
-      setActionTaken('');
-      onClose();
-    }, 1200);
+    setIsSaving(true);
+    setSaveError(null);
+    try {
+      await addCareNote(student.id, alertLevel, content.trim(), actionTaken.trim() || undefined);
+      setIsSaved(true);
+      setTimeout(() => {
+        setIsSaved(false);
+        setContent('');
+        setActionTaken('');
+        onClose();
+      }, 1200);
+    } catch (err: any) {
+      setSaveError(err?.message || '儲存關懷紀錄失敗，請確認權限或連線狀態。');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs animate-in fade-in">
       <div className="relative w-full max-w-lg bg-white rounded-3xl p-6 sm:p-7 shadow-2xl border border-teal-100">
         <button
+          type="button"
           onClick={onClose}
           className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-100 transition-colors"
         >
@@ -59,12 +70,18 @@ export const CareNoteModal: React.FC<CareNoteModalProps> = ({ isOpen, onClose, s
         {isSaved ? (
           <div className="py-12 text-center">
             <CheckCircle className="w-14 h-14 mx-auto text-emerald-500 mb-2 animate-bounce" />
-            <h4 className="text-lg font-bold text-slate-800">關懷紀錄已成功儲存！</h4>
-            <p className="text-xs text-slate-500 mt-1">輔導紀錄已同步至學生個人健康檔案。</p>
+            <h4 className="text-lg font-bold text-slate-800">關懷紀錄已確認儲存！</h4>
+            <p className="text-xs text-slate-500 mt-1">輔導紀錄已同步寫入資料庫。</p>
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Alert Level */}
+            {saveError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{saveError}</span>
+              </div>
+            )}
+
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-2">
                 關懷預警等級判定
@@ -106,7 +123,6 @@ export const CareNoteModal: React.FC<CareNoteModalProps> = ({ isOpen, onClose, s
               </div>
             </div>
 
-            {/* Content */}
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">
                 觀察紀錄與問題簡述 <span className="text-rose-500">*</span>
@@ -121,7 +137,6 @@ export const CareNoteModal: React.FC<CareNoteModalProps> = ({ isOpen, onClose, s
               />
             </div>
 
-            {/* Action Taken */}
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">
                 已採取或預計進行之輔導措施
@@ -135,7 +150,6 @@ export const CareNoteModal: React.FC<CareNoteModalProps> = ({ isOpen, onClose, s
               />
             </div>
 
-            {/* Action Buttons */}
             <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-100">
               <button
                 type="button"
@@ -146,9 +160,10 @@ export const CareNoteModal: React.FC<CareNoteModalProps> = ({ isOpen, onClose, s
               </button>
               <button
                 type="submit"
-                className="px-5 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs shadow-md shadow-teal-600/20 transition-all hover:scale-[1.02]"
+                disabled={isSaving}
+                className="px-5 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white font-bold text-xs shadow-md shadow-teal-600/20 transition-all hover:scale-[1.02]"
               >
-                儲存關懷筆記
+                {isSaving ? '儲存同步中...' : '儲存關懷筆記'}
               </button>
             </div>
           </form>

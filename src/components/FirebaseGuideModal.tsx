@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Database, ShieldCheck, Globe, CheckCircle2, Copy, Sparkles, Key, Check } from 'lucide-react';
+import { X, Database, ShieldCheck, Globe, CheckCircle2, Copy, Sparkles, Check } from 'lucide-react';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 interface FirebaseGuideModalProps {
@@ -12,6 +12,8 @@ export const FirebaseGuideModal: React.FC<FirebaseGuideModalProps> = ({ isOpen, 
 
   if (!isOpen) return null;
 
+  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+
   const handleCopy = (text: string, key: string) => {
     navigator.clipboard.writeText(text);
     setCopiedKey(key);
@@ -19,17 +21,21 @@ export const FirebaseGuideModal: React.FC<FirebaseGuideModalProps> = ({ isOpen, 
   };
 
   const firestoreCollections = [
-    { name: 'users', desc: '校園使用者 (學生、教師、管理員) 帳號與角色檔案', rbac: '本人可讀改，導師可讀學生，管理員可讀寫' },
-    { name: 'classes', desc: '班級名冊與責任導師資料', rbac: '全校已登入者可讀，管理員可維護' },
-    { name: 'mood_logs', desc: '學生每日心情簽到與情緒溫度計分數', rbac: '學生本人可讀寫，班導師與管理員可查閱' },
-    { name: 'care_notes', desc: '機密教師輔導關懷筆記與處遇措施', rbac: '嚴格限制教師與管理員，學生端不可見' },
-    { name: 'chat_messages', desc: '學生與 AI 心靈小夥伴 (心心) 對話歷史', rbac: '學生本人與專任輔導教師可查閱' },
+    { name: 'users', desc: '校園使用者 (學生、教師、管理員) 帳號與角色檔案', rbac: '本人僅可讀改姓名/頭像，導師僅可讀負責班級學生，管理員管理' },
+    { name: 'admins', desc: '系統管理員授權目錄 (含首次啟動認領鎖定)', rbac: '僅限已驗證管理員讀寫或原子化首次認領' },
+    { name: 'classes', desc: '班級名冊與責任導師資料', rbac: '已登入且帳號啟用者可讀，管理員可維護' },
+    { name: 'mood_logs', desc: '學生每日心情簽到（以 uid_date 為唯一文件鍵）', rbac: '學生本人可讀寫，責任導師僅可讀負責班級，管理員可讀' },
+    { name: 'care_notes', desc: '教師輔導關懷筆記與處遇措施', rbac: '僅限負責班級導師與管理員寫入/查閱，學生端不可見' },
+    { name: 'chat_messages', desc: '學生與「心心」AI 對話歷史（含模型偵測情緒與系統狀態）', rbac: '學生本人與責任導師可查閱；建立後不可竄改或刪除（管理員除外）' },
+    { name: 'crisis_alerts', desc: '暴力傷害／自傷高風險即時預警通報與導師簽收狀態', rbac: '學生建立觸發通報，責任導師與管理員可查閱及更新處理狀態' },
+    { name: 'chat_access_logs', desc: '教師查閱學生 AI 對話全文之稽核日誌', rbac: '教師寫入查閱紀錄，本人與管理員可稽核，不可竄改或刪除' },
   ];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in">
       <div className="relative w-full max-w-3xl bg-white rounded-3xl p-6 sm:p-8 shadow-2xl border border-teal-100 max-h-[90vh] overflow-y-auto">
         <button
+          type="button"
           onClick={onClose}
           className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-100 transition-colors"
         >
@@ -43,7 +49,7 @@ export const FirebaseGuideModal: React.FC<FirebaseGuideModalProps> = ({ isOpen, 
           <div>
             <div className="flex items-center gap-2">
               <h3 className="text-xl font-extrabold text-slate-800">
-                Firebase 雲端資料庫與發布狀態
+                Firebase 雲端資料庫與安全架構說明
               </h3>
               <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold border border-emerald-200 flex items-center gap-1">
                 <Check className="w-3 h-3" /> 雲端連線運行中
@@ -56,10 +62,9 @@ export const FirebaseGuideModal: React.FC<FirebaseGuideModalProps> = ({ isOpen, 
         </div>
 
         <div className="space-y-6">
-          {/* Section 1: Connected Live Firebase Project */}
           <div className="p-4 rounded-2xl bg-teal-50/70 border border-teal-200">
             <h4 className="text-sm font-bold text-teal-900 mb-1 flex items-center gap-1.5">
-              <Sparkles className="w-4 h-4 text-teal-600" /> Firebase 雲端整合狀態：已成功佈署
+              <Sparkles className="w-4 h-4 text-teal-600" /> Firebase 雲端整合與資料庫設定
             </h4>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-teal-900 mt-2">
               <div className="bg-white/80 p-2.5 rounded-xl border border-teal-200/80">
@@ -72,11 +77,10 @@ export const FirebaseGuideModal: React.FC<FirebaseGuideModalProps> = ({ isOpen, 
               </div>
             </div>
             <p className="text-xs text-teal-800 mt-2 leading-relaxed">
-              所有學生的心情簽到、AI「心心」聊天室對話、班級名冊與教師輔導筆記皆直接實時同步至 Firestore 雲端資料庫。
+              正式雲端模式採用 Firebase Auth 驗證 + 最小權限查詢 + 伺服器端 Gemini API 代理；管理員首次可認領初始管理員權限。
             </p>
           </div>
 
-          {/* Section 2: Firestore Collections Schema */}
           <div>
             <h4 className="text-sm font-bold text-slate-800 mb-2 flex items-center gap-1.5">
               <ShieldCheck className="w-4 h-4 text-teal-600" /> Firestore 集合結構與安全規則 (firestore.rules)
@@ -103,36 +107,32 @@ export const FirebaseGuideModal: React.FC<FirebaseGuideModalProps> = ({ isOpen, 
             </div>
           </div>
 
-          {/* Section 3: Live URL & Multi-User Sharing */}
-          <div className="p-4 rounded-2xl bg-sky-50 border border-sky-200">
-            <h4 className="text-sm font-bold text-sky-900 mb-1 flex items-center gap-1.5">
-              <Globe className="w-4 h-4 text-sky-600" /> 透過專屬網址發布與多人連線使用
-            </h4>
-            <p className="text-xs text-sky-800 mb-3 leading-relaxed">
-              任何教師或學生只要打開下方公開網址，便可在不同裝置上共同簽到與檢視即時資料：
-            </p>
-            <div className="flex items-center gap-2 bg-white p-2.5 rounded-xl border border-sky-200">
-              <span className="font-mono text-xs text-sky-900 truncate flex-1">
-                https://ais-pre-73tghrd4tkqsvyl7mwrvly-778069587729.asia-southeast1.run.app
-              </span>
-              <button
-                onClick={() =>
-                  handleCopy(
-                    'https://ais-pre-73tghrd4tkqsvyl7mwrvly-778069587729.asia-southeast1.run.app',
-                    'url'
-                  )
-                }
-                className="px-3 py-1 bg-sky-100 hover:bg-sky-200 text-sky-800 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 shrink-0"
-              >
-                {copiedKey === 'url' ? <CheckCircle2 className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                {copiedKey === 'url' ? '已複製' : '複製網址'}
-              </button>
+          {currentOrigin && (
+            <div className="p-4 rounded-2xl bg-sky-50 border border-sky-200">
+              <h4 className="text-sm font-bold text-sky-900 mb-1 flex items-center gap-1.5">
+                <Globe className="w-4 h-4 text-sky-600" /> 目前系統連線網址
+              </h4>
+              <p className="text-xs text-sky-800 mb-3 leading-relaxed">
+                若發布至新網域（例如 Vercel），請務必將該網域加入 Firebase Console → Authentication → Settings → Authorized domains。
+              </p>
+              <div className="flex items-center gap-2 bg-white p-2.5 rounded-xl border border-sky-200">
+                <span className="font-mono text-xs text-sky-900 truncate flex-1">{currentOrigin}</span>
+                <button
+                  type="button"
+                  onClick={() => handleCopy(currentOrigin, 'url')}
+                  className="px-3 py-1 bg-sky-100 hover:bg-sky-200 text-sky-800 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 shrink-0"
+                >
+                  {copiedKey === 'url' ? <CheckCircle2 className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copiedKey === 'url' ? '已複製' : '複製網址'}
+                </button>
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         <div className="mt-6 flex justify-end">
           <button
+            type="button"
             onClick={onClose}
             className="px-6 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs shadow-md shadow-teal-600/20 transition-all"
           >

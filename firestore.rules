@@ -1,148 +1,413 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Default Deny All Catch-All
+    // 0. Default Deny All Catch-All
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Helper Functions
+    // Helper Primitives
     function isSignedIn() {
       return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
     }
 
     function isValidId(id) {
       return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
-    function getUserData() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    function incoming() {
+      return request.resource.data;
     }
 
-    function isAdmin() {
-      return isSignedIn() && (
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
-        request.auth.token.email == 'tingyu19980928@gmail.com' ||
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'admin')
-      );
-    }
-
-    function isTeacher() {
-      return isSignedIn() && (
-        isAdmin() ||
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'teacher')
-      );
-    }
-
-    function isTeacherOfClass(classId) {
-      return isSignedIn() && (
-        isAdmin() ||
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == 'teacher' && getUserData().classId == classId)
-      );
+    function existing() {
+      return resource.data;
     }
 
     function isOwner(userId) {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    // 1. Users Collection
-    match /users/{userId} {
-      allow read: if isSignedIn() && (
-        isOwner(userId) ||
-        isTeacher() ||
-        isAdmin()
-      );
-      
-      allow create: if isSignedIn() && isValidId(userId) && (
-        (isOwner(userId) && request.resource.data.role == 'student') ||
-        isAdmin()
-      );
+    function userExists(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid));
+    }
 
-      allow update: if isSignedIn() && isValidId(userId) && (
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isActiveUser() {
+      return isSignedIn() &&
+        userExists(request.auth.uid) &&
+        getUserData().get('status', 'active') == 'active';
+    }
+
+    function isAdmin() {
+      return isVerified() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (userExists(request.auth.uid) &&
+          getUserData().role == 'admin' &&
+          getUserData().get('status', 'active') == 'active')
+      );
+    }
+
+    function isActiveTeacher() {
+      return isVerified() && (
         isAdmin() ||
-        (isOwner(userId) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'id']))
+        (userExists(request.auth.uid) &&
+          getUserData().role == 'teacher' &&
+          getUserData().get('status', 'active') == 'active')
+      );
+    }
+
+    function isTeacherOfClass(classId) {
+      return isVerified() && (
+        isAdmin() ||
+        (userExists(request.auth.uid) &&
+          getUserData().role == 'teacher' &&
+          getUserData().get('status', 'active') == 'active' &&
+          getUserData().get('classId', '') == classId)
+      );
+    }
+
+    // Validation Helpers
+    function isValidUser(data) {
+      return data.keys().hasAll(['id', 'name', 'role']) &&
+        data.keys().hasOnly([
+          'id', 'name', 'email', 'role', 'grade', 'classId', 'className',
+          'studentNumber', 'avatar', 'status', 'passwordSet', 'needsActivation',
+          'authLinked', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 64 &&
+        data.role in ['student', 'teacher', 'admin'] &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 128)) &&
+        (!('grade' in data) || (data.grade is string && data.grade.size() <= 20)) &&
+        (!('classId' in data) || (data.classId is string && data.classId.size() <= 64)) &&
+        (!('className' in data) || (data.className is string && data.className.size() <= 50)) &&
+        (!('studentNumber' in data) || (data.studentNumber is string && data.studentNumber.size() <= 20)) &&
+        (!('avatar' in data) || (data.avatar is string && data.avatar.size() <= 64)) &&
+        (!('status' in data) || data.status in ['active', 'disabled']) &&
+        (!('passwordSet' in data) || data.passwordSet is bool) &&
+        (!('needsActivation' in data) || data.needsActivation is bool) &&
+        (!('authLinked' in data) || data.authLinked is bool);
+    }
+
+    function isValidClass(data) {
+      return data.keys().hasAll(['id', 'name', 'grade', 'teacherId']) &&
+        data.keys().hasOnly(['id', 'name', 'grade', 'teacherId', 'teacherName', 'studentCount', 'createdAt']) &&
+        data.id is string && data.id.size() > 0 && data.id.size() <= 64 &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 50 &&
+        data.grade is string && data.grade.size() > 0 && data.grade.size() <= 20 &&
+        data.teacherId is string && data.teacherId.size() > 0 && data.teacherId.size() <= 128;
+    }
+
+    function isValidMoodLog(data) {
+      return data.keys().hasAll(['id', 'studentId', 'classId', 'mood', 'score', 'date']) &&
+        data.keys().hasOnly([
+          'id', 'studentId', 'studentName', 'classId', 'mood', 'score',
+          'tags', 'note', 'date', 'createdAt', 'updatedAt', 'createdAtMs'
+        ]) &&
+        data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+        data.studentId is string && data.studentId.size() > 0 && data.studentId.size() <= 128 &&
+        data.classId is string && data.classId.size() > 0 && data.classId.size() <= 64 &&
+        data.mood in ['happy', 'calm', 'anxious', 'sad', 'angry', 'tired'] &&
+        data.score is number && data.score >= 1 && data.score <= 5 &&
+        data.date is string && data.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
+        (!('tags' in data) || (data.tags is list && data.tags.size() <= 6)) &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 500));
+    }
+
+    function isValidCareNote(data) {
+      return data.keys().hasAll(['id', 'studentId', 'classId', 'teacherId', 'alertLevel', 'content']) &&
+        data.keys().hasOnly([
+          'id', 'studentId', 'studentName', 'classId', 'teacherId', 'teacherName',
+          'alertLevel', 'content', 'actionTaken', 'createdAt', 'createdAtMs'
+        ]) &&
+        data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+        data.studentId is string && data.studentId.size() > 0 && data.studentId.size() <= 128 &&
+        data.classId is string && data.classId.size() > 0 && data.classId.size() <= 64 &&
+        data.teacherId is string && data.teacherId.size() > 0 && data.teacherId.size() <= 128 &&
+        data.alertLevel in ['normal', 'attention', 'urgent'] &&
+        data.content is string && data.content.size() > 0 && data.content.size() <= 1000 &&
+        (!('actionTaken' in data) || (data.actionTaken is string && data.actionTaken.size() <= 500));
+    }
+
+    function isValidChatMessage(data) {
+      return data.keys().hasAll(['id', 'studentId', 'classId', 'sender', 'text']) &&
+        data.keys().hasOnly([
+          'id', 'studentId', 'studentName', 'classId', 'sender', 'text',
+          'selfReportedMood', 'modelDetectedEmotion', 'emotionTag',
+          'situationCategory', 'riskLevel', 'aiStatus', 'teacherNotified',
+          'timestamp', 'createdAt', 'createdAtMs'
+        ]) &&
+        data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+        data.studentId is string && data.studentId.size() > 0 && data.studentId.size() <= 128 &&
+        data.classId is string && data.classId.size() > 0 && data.classId.size() <= 64 &&
+        data.sender in ['student', 'ai'] &&
+        data.text is string && data.text.size() > 0 && data.text.size() <= 4000;
+    }
+
+    function isValidCrisisAlert(data) {
+      return data.keys().hasAll(['id', 'studentId', 'classId', 'situationCategory', 'severity', 'status', 'createdAtMs']) &&
+        data.keys().hasOnly([
+          'id', 'studentId', 'studentName', 'classId', 'className',
+          'situationCategory', 'severity', 'triggerExcerpt', 'aiSummary',
+          'status', 'acknowledgedBy', 'acknowledgedByName', 'acknowledgedAt',
+          'resolutionNote', 'createdAt', 'createdAtMs'
+        ]) &&
+        data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+        data.studentId is string && data.studentId.size() > 0 && data.studentId.size() <= 128 &&
+        data.classId is string && data.classId.size() > 0 && data.classId.size() <= 64 &&
+        data.severity in ['elevated', 'critical'] &&
+        data.status in ['open', 'acknowledged', 'resolved'] &&
+        data.createdAtMs is number &&
+        (!('triggerExcerpt' in data) || (data.triggerExcerpt is string && data.triggerExcerpt.size() <= 600)) &&
+        (!('aiSummary' in data) || (data.aiSummary is string && data.aiSummary.size() <= 1000)) &&
+        (!('resolutionNote' in data) || (data.resolutionNote is string && data.resolutionNote.size() <= 1000));
+    }
+
+    function isValidChatAccessLog(data) {
+      return data.keys().hasAll(['id', 'teacherId', 'studentId', 'classId', 'timestamp']) &&
+        data.keys().hasOnly([
+          'id', 'teacherId', 'teacherName', 'studentId', 'studentName',
+          'classId', 'timestamp', 'createdAtMs', 'purpose'
+        ]) &&
+        data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+        data.teacherId is string && data.teacherId.size() > 0 && data.teacherId.size() <= 128 &&
+        data.studentId is string && data.studentId.size() > 0 && data.studentId.size() <= 128 &&
+        data.classId is string && data.classId.size() > 0 && data.classId.size() <= 64 &&
+        data.timestamp is string && data.timestamp.size() > 0 && data.timestamp.size() <= 64 &&
+        (!('purpose' in data) || (data.purpose is string && data.purpose.size() <= 300));
+    }
+
+    // 0b. System Bootstrap Lock & Admin Registry (First-run atomic claim; no hardcoded admin emails)
+    match /system/{docId} {
+      allow get: if isSignedIn() && docId == 'admin_bootstrap';
+      allow list: if false;
+      allow create: if docId == 'admin_bootstrap' &&
+        isVerified() &&
+        !exists(/databases/$(database)/documents/system/admin_bootstrap) &&
+        incoming().keys().hasAll(['claimedBy', 'claimedEmail']) &&
+        incoming().keys().hasOnly(['claimedBy', 'claimedEmail', 'claimedAt']) &&
+        incoming().claimedBy == request.auth.uid &&
+        existsAfter(/databases/$(database)/documents/admins/$(request.auth.uid));
+      allow update, delete: if false;
+    }
+
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && (isOwner(adminId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(adminId) && isVerified() && (
+        isAdmin() ||
+        (isOwner(adminId) &&
+         !exists(/databases/$(database)/documents/system/admin_bootstrap) &&
+         existsAfter(/databases/$(database)/documents/system/admin_bootstrap))
+      );
+      allow update: if isAdmin();
+      allow delete: if isAdmin() && adminId != request.auth.uid;
+    }
+
+    // 1. Users Collection (Strict PII & Class Isolation)
+    match /users/{userId} {
+      allow get: if isSignedIn() && (
+        isOwner(userId) ||
+        isAdmin() ||
+        (isActiveTeacher() && existing().role == 'student' && existing().classId == getUserData().classId)
       );
 
-      allow delete: if isAdmin();
+      allow list: if isSignedIn() && (
+        isAdmin() ||
+        (isActiveTeacher() && existing().role == 'student' && existing().classId == getUserData().classId)
+      );
+
+      allow create: if isVerified() && isValidId(userId) && isValidUser(incoming()) && (
+        isAdmin() ||
+        (isOwner(userId) &&
+         incoming().id == request.auth.uid &&
+         incoming().role in ['student', 'teacher'] &&
+         incoming().get('status', 'active') == 'active') ||
+        (isOwner(userId) &&
+         incoming().id == request.auth.uid &&
+         incoming().role == 'admin' &&
+         incoming().get('status', 'active') == 'active' &&
+         !exists(/databases/$(database)/documents/system/admin_bootstrap) &&
+         existsAfter(/databases/$(database)/documents/admins/$(request.auth.uid)))
+      );
+
+      // Only admins may modify or delete existing student/teacher user records
+      allow update: if isAdmin() && isValidId(userId) && isValidUser(incoming());
+
+      allow delete: if isAdmin() && isValidId(userId);
     }
 
     // 2. Classes Collection
     match /classes/{classId} {
-      allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow get: if isSignedIn() && isValidId(classId);
+      allow list: if isSignedIn();
+      allow create, update: if isAdmin() && isValidId(classId) && isValidClass(incoming());
+      allow delete: if isAdmin() && isValidId(classId);
     }
 
-    // 3. Mood Logs Collection
+    // 3. Mood Logs Collection (1 log per student per day; class-scoped teacher read)
     match /mood_logs/{logId} {
-      allow read: if isSignedIn() && (
-        resource.data.studentId == request.auth.uid ||
-        isTeacherOfClass(resource.data.classId) ||
+      allow get: if isVerified() && isValidId(logId) && (
+        (isActiveUser() && existing().studentId == request.auth.uid) ||
+        isTeacherOfClass(existing().classId) ||
         isAdmin()
       );
 
-      allow create: if isSignedIn() && isValidId(logId) && (
-        request.resource.data.studentId == request.auth.uid &&
-        request.resource.data.score >= 1 &&
-        request.resource.data.score <= 5 &&
-        request.resource.data.mood in ['happy', 'calm', 'anxious', 'sad', 'angry', 'tired']
-      );
-
-      allow update: if isSignedIn() && isValidId(logId) && (
-        resource.data.studentId == request.auth.uid &&
-        request.resource.data.studentId == request.auth.uid
-      );
-
-      allow delete: if isAdmin();
-    }
-
-    // 4. Care Notes Collection (Confidential: Teachers & Admins Only)
-    match /care_notes/{noteId} {
-      allow read: if isSignedIn() && (
-        isTeacherOfClass(resource.data.classId) ||
+      allow list: if isVerified() && (
+        (isActiveUser() && existing().studentId == request.auth.uid) ||
+        isTeacherOfClass(existing().classId) ||
         isAdmin()
       );
-      allow create: if isSignedIn() && (
-        isTeacherOfClass(request.resource.data.classId) ||
-        isAdmin()
-      );
-      allow update: if isSignedIn() && (
+
+      allow create: if isVerified() && isValidId(logId) && isValidMoodLog(incoming()) && (
         isAdmin() ||
-        (getUserData().role == 'teacher' && resource.data.teacherId == request.auth.uid)
+        (isActiveUser() &&
+         incoming().studentId == request.auth.uid &&
+         incoming().classId == getUserData().get('classId', '') &&
+         incoming().id == logId)
       );
-      allow delete: if isAdmin();
+
+      allow update: if isVerified() && isValidId(logId) && isValidMoodLog(incoming()) && (
+        isAdmin() ||
+        (isActiveUser() &&
+         existing().studentId == request.auth.uid &&
+         incoming().studentId == existing().studentId &&
+         incoming().classId == existing().classId &&
+         incoming().date == existing().date &&
+         incoming().id == existing().id)
+      );
+
+      allow delete: if isAdmin() && isValidId(logId);
     }
 
-    // 5. Chat Messages Collection (AI companion chats)
-    // Teacher can ONLY view student chat if teacher belongs to the same class!
-    // Students can ONLY view their own chat!
-    // Raw chat content cannot be edited by teachers or students (immutability)
-    match /chat_messages/{messageId} {
-      allow read: if isSignedIn() && (
-        resource.data.studentId == request.auth.uid ||
-        isTeacherOfClass(resource.data.classId) ||
+    // 4. Care Notes Collection (Confidential: Class Teachers & Admins Only)
+    match /care_notes/{noteId} {
+      allow get: if isVerified() && isValidId(noteId) && (
+        isTeacherOfClass(existing().classId) ||
         isAdmin()
       );
 
-      allow create: if isSignedIn() && isValidId(messageId) && (
-        request.resource.data.studentId == request.auth.uid
+      allow list: if isVerified() && (
+        isTeacherOfClass(existing().classId) ||
+        isAdmin()
       );
 
-      // Raw messages are immutable - cannot be updated by anyone
-      allow update: if false;
+      allow create: if isVerified() && isValidId(noteId) && isValidCareNote(incoming()) && (
+        isAdmin() ||
+        (isTeacherOfClass(incoming().classId) &&
+         incoming().teacherId == request.auth.uid &&
+         exists(/databases/$(database)/documents/users/$(incoming().studentId)) &&
+         get(/databases/$(database)/documents/users/$(incoming().studentId)).data.classId == incoming().classId)
+      );
 
-      // Admin can delete messages for data retention or student privacy requests
-      allow delete: if isAdmin();
+      allow update: if isVerified() && isValidId(noteId) && isValidCareNote(incoming()) && (
+        isAdmin() ||
+        (isTeacherOfClass(existing().classId) &&
+         existing().teacherId == request.auth.uid &&
+         incoming().teacherId == existing().teacherId &&
+         incoming().studentId == existing().studentId &&
+         incoming().classId == existing().classId)
+      );
+
+      allow delete: if isAdmin() && isValidId(noteId);
     }
 
-    // 6. Chat Access Audit Logs (Recording when a teacher views student transcripts)
+    // 5. Chat Messages Collection (Immutable transcripts; strict student/class-teacher isolation)
+    match /chat_messages/{messageId} {
+      allow get: if isVerified() && isValidId(messageId) && (
+        (isActiveUser() && existing().studentId == request.auth.uid) ||
+        isTeacherOfClass(existing().classId) ||
+        isAdmin()
+      );
+
+      allow list: if isVerified() && (
+        (isActiveUser() && existing().studentId == request.auth.uid) ||
+        isTeacherOfClass(existing().classId) ||
+        isAdmin()
+      );
+
+      allow create: if isVerified() && isValidId(messageId) && isValidChatMessage(incoming()) && (
+        isAdmin() ||
+        (isActiveUser() &&
+         incoming().studentId == request.auth.uid &&
+         incoming().classId == getUserData().get('classId', '') &&
+         incoming().id == messageId)
+      );
+
+      // Raw chat content is immutable
+      allow update: if false;
+
+      allow delete: if isAdmin() && isValidId(messageId);
+    }
+
+    // 6. Crisis Alerts Collection (Immediate safety escalation & teacher acknowledgement)
+    match /crisis_alerts/{alertId} {
+      allow get: if isVerified() && isValidId(alertId) && (
+        (isActiveUser() && existing().studentId == request.auth.uid) ||
+        isTeacherOfClass(existing().classId) ||
+        isAdmin()
+      );
+
+      allow list: if isVerified() && (
+        (isActiveUser() && existing().studentId == request.auth.uid) ||
+        isTeacherOfClass(existing().classId) ||
+        isAdmin()
+      );
+
+      allow create: if isVerified() && isValidId(alertId) && isValidCrisisAlert(incoming()) && (
+        isAdmin() ||
+        (isActiveUser() &&
+         incoming().studentId == request.auth.uid &&
+         incoming().classId == getUserData().get('classId', '') &&
+         incoming().status == 'open' &&
+         incoming().id == alertId)
+      );
+
+      allow update: if isVerified() && isValidId(alertId) && isValidCrisisAlert(incoming()) && (
+        isAdmin() ||
+        (isTeacherOfClass(existing().classId) &&
+         incoming().studentId == existing().studentId &&
+         incoming().classId == existing().classId &&
+         incoming().diff(existing()).affectedKeys().hasOnly([
+           'status', 'acknowledgedBy', 'acknowledgedByName', 'acknowledgedAt', 'resolutionNote'
+         ]))
+      );
+
+      allow delete: if isAdmin() && isValidId(alertId);
+    }
+
+    // 7. Chat Access Audit Logs (Immutable audit trail of teacher transcript views)
     match /chat_access_logs/{logId} {
-      allow read: if isSignedIn() && (isTeacher() || isAdmin());
-      allow create: if isSignedIn() && (isTeacher() || isAdmin()) && isValidId(logId);
+      allow get: if isVerified() && isValidId(logId) && (
+        isAdmin() ||
+        (isActiveTeacher() && existing().teacherId == request.auth.uid)
+      );
+
+      allow list: if isVerified() && (
+        isAdmin() ||
+        (isActiveTeacher() && existing().teacherId == request.auth.uid)
+      );
+
+      allow create: if isVerified() && isValidId(logId) && isValidChatAccessLog(incoming()) && (
+        isAdmin() ||
+        (isTeacherOfClass(incoming().classId) &&
+         incoming().teacherId == request.auth.uid &&
+         exists(/databases/$(database)/documents/users/$(incoming().studentId)) &&
+         get(/databases/$(database)/documents/users/$(incoming().studentId)).data.classId == incoming().classId)
+      );
+
       allow update: if false;
-      allow delete: if isAdmin();
+      allow delete: if isAdmin() && isValidId(logId);
     }
 
-    // 7. Connection Health Check
+    // 8. Connection Health Check
     match /test/{testId} {
       allow read: if true;
     }

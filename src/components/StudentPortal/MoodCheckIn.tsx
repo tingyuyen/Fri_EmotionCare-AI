@@ -1,8 +1,20 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { MoodType, MOOD_DEFINITIONS } from '../../types';
 import confetti from 'canvas-confetti';
-import { Sparkles, CheckCircle2, Heart, MessageSquare, Sun, CloudRain, CloudSun, Zap, ArrowRight, RotateCcw } from 'lucide-react';
+import {
+  Sparkles,
+  CheckCircle2,
+  Heart,
+  MessageSquare,
+  Sun,
+  CloudRain,
+  CloudSun,
+  Zap,
+  ArrowRight,
+  RotateCcw,
+  AlertTriangle,
+} from 'lucide-react';
 
 const CONTEXT_TAGS = [
   '課業學習 📚',
@@ -24,15 +36,32 @@ interface MoodCheckInProps {
 export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBreathing }) => {
   const { currentUser, moodLogs, todayDate, addMoodLog } = useApp();
 
-  const todayLog = moodLogs.find((l) => l.studentId === currentUser.id && l.date === todayDate);
+  const todayLog = currentUser
+    ? moodLogs.find((l) => l.studentId === currentUser.id && l.date === todayDate)
+    : undefined;
 
   const [selectedMood, setSelectedMood] = useState<MoodType>(todayLog?.mood || 'happy');
   const [score, setScore] = useState<number>(todayLog?.score || 4);
   const [selectedTags, setSelectedTags] = useState<string[]>(todayLog?.tags || ['課業學習 📚']);
   const [note, setNote] = useState<string>(todayLog?.note || '');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
-  const [justSubmitted, setJustSubmitted] = useState<boolean>(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState<boolean>(!todayLog);
+
+  // Sync form when todayLog loads asynchronously from Firestore
+  useEffect(() => {
+    if (todayLog) {
+      setSelectedMood(todayLog.mood);
+      setScore(todayLog.score);
+      setSelectedTags(todayLog.tags || []);
+      setNote(todayLog.note || '');
+      setIsEditing(false);
+    } else {
+      setIsEditing(true);
+    }
+  }, [todayLog?.id, todayLog?.updatedAt]);
+
+  if (!currentUser) return null;
 
   const handleTagToggle = (tag: string) => {
     if (selectedTags.includes(tag)) {
@@ -47,11 +76,11 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
+    setSubmitError(null);
 
     try {
       await addMoodLog(selectedMood, score, selectedTags, note);
 
-      // Trigger celebratory joyful confetti
       confetti({
         particleCount: 80,
         spread: 60,
@@ -59,10 +88,10 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
         colors: ['#0d9488', '#10b981', '#38bdf8', '#fbbf24', '#f472b6'],
       });
 
-      setJustSubmitted(true);
       setIsEditing(false);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      setSubmitError(err?.message || '儲存心情紀錄時發生錯誤，請確認網路或重新登入後再試一次。');
     } finally {
       setIsSubmitting(false);
     }
@@ -85,7 +114,6 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
     }
   };
 
-  // If already submitted and not in edit mode, show completed card
   if (todayLog && !isEditing) {
     const meta = MOOD_DEFINITIONS[todayLog.mood];
     return (
@@ -95,7 +123,7 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
             {meta.emoji}
           </div>
           <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold mb-2">
-            <CheckCircle2 className="w-3.5 h-3.5" /> 今日心情簽到已完成！
+            <CheckCircle2 className="w-3.5 h-3.5" /> 今日心情簽到已完成（已同步儲存）！
           </div>
           <h2 className="text-2xl font-black text-slate-800">
             {currentUser.name}，謝謝你今天的分享！
@@ -104,7 +132,6 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
             你今天的心情天氣是：<span className="font-bold text-teal-700">{meta.label}</span>（溫度指數：{todayLog.score}/5 分）
           </p>
 
-          {/* Tags */}
           {todayLog.tags.length > 0 && (
             <div className="flex flex-wrap justify-center gap-2 mt-4">
               {todayLog.tags.map((t) => (
@@ -118,7 +145,6 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
             </div>
           )}
 
-          {/* Note */}
           {todayLog.note && (
             <div className="mt-4 p-4 rounded-2xl bg-teal-50/60 border border-teal-100 text-slate-700 text-sm italic text-left max-w-lg mx-auto">
               <span className="font-bold not-italic text-xs text-teal-700 block mb-1">
@@ -128,17 +154,18 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
             </div>
           )}
 
-          {/* Prompt Action Buttons */}
           <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-3">
             <button
+              type="button"
               onClick={onGoToChat}
               className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-gradient-to-r from-teal-500 to-emerald-500 hover:from-teal-600 hover:to-emerald-600 text-white font-bold text-sm shadow-md shadow-teal-500/20 transition-all hover:scale-[1.02]"
             >
               <MessageSquare className="w-4 h-4" />
-              跟心心小光靈聊聊
+              跟心心聊聊
               <ArrowRight className="w-4 h-4" />
             </button>
             <button
+              type="button"
               onClick={onOpenBreathing}
               className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-sky-50 hover:bg-sky-100 text-sky-800 font-semibold text-sm border border-sky-200 transition-colors"
             >
@@ -146,6 +173,7 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
               做個深呼吸舒緩操
             </button>
             <button
+              type="button"
               onClick={() => setIsEditing(true)}
               className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-4 py-3 rounded-2xl text-slate-500 hover:text-slate-700 text-xs font-medium hover:bg-slate-100 transition-colors"
             >
@@ -160,7 +188,6 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
 
   return (
     <div className="bg-white rounded-3xl p-6 sm:p-8 shadow-sm border border-teal-100/80">
-      {/* Header Greeting */}
       <div className="mb-8">
         <div className="flex items-center justify-between">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-teal-50 text-teal-800 text-xs font-semibold">
@@ -176,8 +203,14 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
         </p>
       </div>
 
+      {submitError && (
+        <div className="mb-6 p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+          <span>{submitError}</span>
+        </div>
+      )}
+
       <form onSubmit={handleSubmit} className="space-y-8">
-        {/* Step 1: Mood Cards Selector */}
         <div>
           <label className="block text-sm font-bold text-slate-700 mb-3">
             第一步：選一個你現在的心情卡片 ✨
@@ -212,7 +245,6 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
           </div>
         </div>
 
-        {/* Step 2: Emotion Thermometer (1-5) */}
         <div className="bg-slate-50/80 rounded-2xl p-5 border border-slate-100">
           <div className="flex items-center justify-between mb-2">
             <label className="text-sm font-bold text-slate-700 flex items-center gap-2">
@@ -220,7 +252,9 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
             </label>
             <div className="flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-full bg-white border border-slate-200 shadow-2xs">
               {getThermometerLabel(score).icon}
-              <span className="text-slate-700">{score} 分 - {getThermometerLabel(score).label}</span>
+              <span className="text-slate-700">
+                {score} 分 - {getThermometerLabel(score).label}
+              </span>
             </div>
           </div>
           <div className="relative pt-2 pb-1">
@@ -243,7 +277,6 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
           </div>
         </div>
 
-        {/* Step 3: Context Tags */}
         <div>
           <label className="block text-sm font-bold text-slate-700 mb-2">
             第三步：這份心情跟什麼事情有關呢？（最多選 4 個標籤）🏷️
@@ -269,7 +302,6 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
           </div>
         </div>
 
-        {/* Step 4: Reflection Note */}
         <div>
           <label className="block text-sm font-bold text-slate-700 mb-2">
             第四步：心情悄悄話小日記（選填，想寫就寫喔）✏️
@@ -282,12 +314,9 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
             maxLength={300}
             className="w-full px-4 py-3 rounded-2xl bg-white border border-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 text-sm text-slate-800 placeholder-slate-400 resize-none transition-all"
           />
-          <div className="text-right text-[11px] text-slate-400 mt-1">
-            {note.length} / 300 字
-          </div>
+          <div className="text-right text-[11px] text-slate-400 mt-1">{note.length} / 300 字</div>
         </div>
 
-        {/* Submit Button */}
         <div className="flex items-center justify-end gap-3 pt-2">
           {todayLog && (
             <button
@@ -304,7 +333,7 @@ export const MoodCheckIn: React.FC<MoodCheckInProps> = ({ onGoToChat, onOpenBrea
             className="px-8 py-3.5 rounded-2xl bg-gradient-to-r from-teal-500 to-emerald-500 hover:from-teal-600 hover:to-emerald-600 text-white font-extrabold text-sm shadow-md shadow-teal-500/20 hover:shadow-lg hover:shadow-teal-500/30 transition-all hover:scale-[1.02] disabled:opacity-50 flex items-center gap-2"
           >
             {isSubmitting ? (
-              <span>打卡紀錄中...</span>
+              <span>雲端同步紀錄中...</span>
             ) : (
               <>
                 <Sparkles className="w-4 h-4" />

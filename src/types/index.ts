@@ -3,6 +3,19 @@ export type AccountStatus = 'active' | 'disabled';
 
 export type MoodType = 'happy' | 'calm' | 'anxious' | 'sad' | 'angry' | 'tired';
 
+export type ChatSituationCategory =
+  | 'general_chat'
+  | 'happy_achievement'
+  | 'peer_conflict'
+  | 'bullying'
+  | 'family_issue'
+  | 'academic_stress'
+  | 'anger_frustration'
+  | 'violence_harm_others'
+  | 'self_harm_emergency';
+
+export type RiskLevel = 'none' | 'low' | 'elevated' | 'critical';
+
 export interface User {
   id: string;
   name: string;
@@ -13,9 +26,10 @@ export interface User {
   className?: string;
   studentNumber?: string;
   avatar: string;
-  status?: AccountStatus; // 'active' | 'disabled' (預設為 active)
-  passwordSet?: boolean; // 密碼是否已完成設定
-  needsActivation?: boolean; // 若教師未填密碼，標記需完成安全啟用流程
+  status?: AccountStatus;
+  passwordSet?: boolean;
+  needsActivation?: boolean;
+  authLinked?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -38,8 +52,10 @@ export interface MoodLog {
   score: number; // 1 to 5
   tags: string[];
   note?: string;
-  date: string; // YYYY-MM-DD
+  date: string; // YYYY-MM-DD (Asia/Taipei)
   createdAt: string;
+  updatedAt?: string;
+  createdAtMs?: number;
 }
 
 export interface CareNote {
@@ -53,6 +69,7 @@ export interface CareNote {
   content: string;
   actionTaken?: string;
   createdAt: string;
+  createdAtMs?: number;
 }
 
 export interface ChatMessage {
@@ -62,9 +79,35 @@ export interface ChatMessage {
   classId?: string;
   sender: 'student' | 'ai';
   text: string;
-  emotionTag?: MoodType;
-  timestamp: string; // HH:mm or ISO
-  createdAt?: string; // YYYY-MM-DD HH:mm:ss
+  selfReportedMood?: MoodType;
+  modelDetectedEmotion?: MoodType;
+  emotionTag?: MoodType; // Legacy / display alias
+  situationCategory?: ChatSituationCategory;
+  riskLevel?: RiskLevel;
+  aiStatus?: 'gemini' | 'error_notice' | 'safety_fallback';
+  teacherNotified?: boolean;
+  timestamp: string; // HH:mm (Asia/Taipei)
+  createdAt?: string; // YYYY-MM-DD HH:mm:ss (Asia/Taipei)
+  createdAtMs?: number;
+}
+
+export interface CrisisAlert {
+  id: string;
+  studentId: string;
+  studentName: string;
+  classId: string;
+  className?: string;
+  situationCategory: ChatSituationCategory;
+  severity: 'elevated' | 'critical';
+  triggerExcerpt: string;
+  aiSummary: string;
+  status: 'open' | 'acknowledged' | 'resolved';
+  acknowledgedBy?: string;
+  acknowledgedByName?: string;
+  acknowledgedAt?: string;
+  resolutionNote?: string;
+  createdAt: string;
+  createdAtMs: number;
 }
 
 export interface ChatAccessLog {
@@ -75,6 +118,7 @@ export interface ChatAccessLog {
   studentName: string;
   classId: string;
   timestamp: string;
+  createdAtMs?: number;
   purpose: string;
 }
 
@@ -87,6 +131,21 @@ export interface StudentChatSummary {
   topics: string[];
   careKeypoints: string;
   safetyAlert: boolean;
+  generatedBy?: 'gemini' | 'heuristic';
+}
+
+export interface AiUsageSummary {
+  model: string;
+  totalRequestsToday: number;
+  successfulRequestsToday: number;
+  failedRequestsToday: number;
+  totalPromptTokensToday: number;
+  totalOutputTokensToday: number;
+  dailyLimitPerUser: number;
+  minuteLimitPerUser: number;
+  adminSdkReady: boolean;
+  geminiKeyConfigured: boolean;
+  activeUsersToday: number;
 }
 
 export interface MoodMeta {
@@ -105,7 +164,7 @@ export const MOOD_DEFINITIONS: Record<MoodType, MoodMeta> = {
     type: 'happy',
     label: '開心喜悅',
     emoji: '😊',
-    color: '#10b981', // emerald
+    color: '#10b981',
     bgLight: 'bg-emerald-50',
     borderColor: 'border-emerald-300',
     textColor: 'text-emerald-700',
@@ -115,7 +174,7 @@ export const MOOD_DEFINITIONS: Record<MoodType, MoodMeta> = {
     type: 'calm',
     label: '平靜安心',
     emoji: '😌',
-    color: '#0ea5e9', // sky
+    color: '#0ea5e9',
     bgLight: 'bg-sky-50',
     borderColor: 'border-sky-300',
     textColor: 'text-sky-700',
@@ -125,7 +184,7 @@ export const MOOD_DEFINITIONS: Record<MoodType, MoodMeta> = {
     type: 'anxious',
     label: '焦慮緊張',
     emoji: '😰',
-    color: '#f59e0b', // amber
+    color: '#f59e0b',
     bgLight: 'bg-amber-50',
     borderColor: 'border-amber-300',
     textColor: 'text-amber-700',
@@ -135,7 +194,7 @@ export const MOOD_DEFINITIONS: Record<MoodType, MoodMeta> = {
     type: 'sad',
     label: '難過沮喪',
     emoji: '😢',
-    color: '#6366f1', // indigo
+    color: '#6366f1',
     bgLight: 'bg-indigo-50',
     borderColor: 'border-indigo-300',
     textColor: 'text-indigo-700',
@@ -145,7 +204,7 @@ export const MOOD_DEFINITIONS: Record<MoodType, MoodMeta> = {
     type: 'angry',
     label: '生氣不滿',
     emoji: '😡',
-    color: '#f43f5e', // rose
+    color: '#f43f5e',
     bgLight: 'bg-rose-50',
     borderColor: 'border-rose-300',
     textColor: 'text-rose-700',
@@ -155,10 +214,22 @@ export const MOOD_DEFINITIONS: Record<MoodType, MoodMeta> = {
     type: 'tired',
     label: '疲倦想睡',
     emoji: '🥱',
-    color: '#8b5cf6', // purple
+    color: '#8b5cf6',
     bgLight: 'bg-purple-50',
     borderColor: 'border-purple-300',
     textColor: 'text-purple-700',
     description: '電力快用完了，好想趴著休息一下。',
   },
+};
+
+export const SITUATION_LABELS: Record<ChatSituationCategory, string> = {
+  general_chat: '一般日常聊天',
+  happy_achievement: '開心與成就感',
+  peer_conflict: '同學衝突',
+  bullying: '疑似被霸凌',
+  family_issue: '家庭生活困擾',
+  academic_stress: '課業學習壓力',
+  anger_frustration: '生氣與挫折',
+  violence_harm_others: '暴力或傷害他人',
+  self_harm_emergency: '自傷或緊急危險',
 };

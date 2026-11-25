@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
-import { useApp } from '../../context/AppContext';
-import { User, SchoolClass, UserRole } from '../../types';
+import React, { useState, useEffect } from 'react';
+import { useApp, AdminMutationResult } from '../../context/AppContext';
+import { User, AiUsageSummary } from '../../types';
+import { LEGACY_PRESET_USER_IDS } from '../../data/mockData';
+import { StudentAIChatViewer } from '../TeacherPortal/StudentAIChatViewer';
 import {
   Users,
   GraduationCap,
-  Sparkles,
   Layers,
   Plus,
   Trash2,
@@ -13,9 +14,6 @@ import {
   CheckCircle,
   ShieldCheck,
   Search,
-  BookOpen,
-  UserPlus,
-  Clock,
   Edit2,
   Lock,
   KeyRound,
@@ -24,28 +22,34 @@ import {
   AlertTriangle,
   UserCheck,
   UserX,
-  Send,
   Copy,
-  ExternalLink,
   X,
+  Activity,
+  Link2,
+  MessageSquare,
 } from 'lucide-react';
 
 export const AdminDashboard: React.FC = () => {
   const {
+    appMode,
+    currentUser,
     classes,
     users,
     addClass,
     addUser,
     updateUser,
-    updateUserRole,
     toggleUserStatus,
     activateTeacherAccount,
+    generateTeacherActivationLink,
     deleteUser,
-    resetAllData,
-    firebaseUser,
+    fetchAiUsageSummary,
+    seedSandboxIntoFirestore,
+    cleanupLegacyPresetUsers,
+    resetSandboxData,
   } = useApp();
 
-  const [activeTab, setActiveTab] = useState<'users' | 'classes' | 'sandbox'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'chat_viewer' | 'classes' | 'ai_monitor' | 'sandbox'>('users');
+  const [adminChatClassFilter, setAdminChatClassFilter] = useState<string>('all');
   const [userCategory, setUserCategory] = useState<'student' | 'teacher' | 'all'>('student');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedClassFilter, setSelectedClassFilter] = useState<string>('all');
@@ -58,32 +62,53 @@ export const AdminDashboard: React.FC = () => {
   const [deletingUser, setDeletingUser] = useState<User | null>(null);
   const [activatingUser, setActivatingUser] = useState<User | null>(null);
 
+  // Explicit Admin SDK unconfigured pre-registration fallback dialog
+  const [pendingPreRegPayload, setPendingPreRegPayload] = useState<{
+    data: Omit<User, 'id'> & { password?: string };
+    reason: string;
+  } | null>(null);
+
+  // Real activation link state
+  const [realActivationLink, setRealActivationLink] = useState<string | null>(null);
+  const [activationLinkError, setActivationLinkError] = useState<string | null>(null);
+  const [loadingActivationLink, setLoadingActivationLink] = useState(false);
+
+  // AI usage monitor state
+  const [aiUsage, setAiUsage] = useState<AiUsageSummary | null>(null);
+  const [loadingUsage, setLoadingUsage] = useState(false);
+
   // Class Form State
   const [showAddClass, setShowAddClass] = useState(false);
   const [newClassName, setNewClassName] = useState('');
   const [newClassGrade, setNewClassGrade] = useState('三年級');
   const [newClassTeacherName, setNewClassTeacherName] = useState('李雅玲 老師');
 
-  // Form States for Add Student
+  const defaultClassId = classes[0]?.id || '';
+
   const [studentForm, setStudentForm] = useState({
     name: '',
     email: '',
-    classId: classes[0]?.id || 'class-302',
-    studentNumber: '09',
+    classId: defaultClassId,
+    studentNumber: '02',
     avatar: '🧒',
   });
 
-  // Form States for Add Teacher
   const [teacherForm, setTeacherForm] = useState({
     name: '',
     email: '',
-    classId: classes[0]?.id || 'class-302',
+    classId: defaultClassId,
     password: '',
     showPassword: false,
     avatar: '👩‍🏫',
   });
 
-  // Form States for Edit User
+  useEffect(() => {
+    if (defaultClassId) {
+      setStudentForm((prev) => (prev.classId ? prev : { ...prev, classId: defaultClassId }));
+      setTeacherForm((prev) => (prev.classId ? prev : { ...prev, classId: defaultClassId }));
+    }
+  }, [defaultClassId]);
+
   const [editFormData, setEditFormData] = useState<{
     name: string;
     email: string;
@@ -102,43 +127,110 @@ export const AdminDashboard: React.FC = () => {
     newPassword: '',
   });
 
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [toast, setToast] = useState<{ type: 'success' | 'warning' | 'error'; message: string } | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
 
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3500);
+  const showToast = (message: string, type: 'success' | 'warning' | 'error' = 'success') => {
+    setToast({ type, message });
+    setTimeout(() => setToast(null), 5000);
+  };
+
+  const loadAiUsage = async () => {
+    setLoadingUsage(true);
+    try {
+      const data = await fetchAiUsageSummary();
+      setAiUsage(data);
+    } finally {
+      setLoadingUsage(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'ai_monitor' && appMode === 'cloud') {
+      loadAiUsage();
+    }
+  }, [activeTab, appMode]);
+
+  // Fetch real activation link when opening Modal 4
+  useEffect(() => {
+    if (!activatingUser) {
+      setRealActivationLink(null);
+      setActivationLinkError(null);
+      return;
+    }
+    if (appMode === 'sandbox') {
+      setActivationLinkError('離線沙盒模式不連線 Firebase Auth，僅供預覽啟用狀態切換。');
+      return;
+    }
+    let cancelled = false;
+    setLoadingActivationLink(true);
+    setActivationLinkError(null);
+    generateTeacherActivationLink(activatingUser.id, activatingUser.email)
+      .then((res) => {
+        if (cancelled) return;
+        if (res.ok && res.activationLink) {
+          setRealActivationLink(res.activationLink);
+        } else {
+          setActivationLinkError(res.error || '無法產生密碼設定連結。');
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) setActivationLinkError(err?.message || '查詢啟用連結失敗');
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingActivationLink(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activatingUser?.id, appMode]);
+
+  const handleMutationOutcome = (result: AdminMutationResult, successMsg: string) => {
+    if (result.warning) {
+      showToast(result.warning, 'warning');
+    } else {
+      showToast(successMsg, 'success');
+    }
   };
 
   // Class creation
   const handleCreateClass = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newClassName.trim()) return;
+    if (!newClassName.trim() || submitting) return;
 
-    await addClass({
-      name: newClassName,
-      grade: newClassGrade,
-      teacherId: `teacher-${Date.now()}`,
-      teacherName: newClassTeacherName,
-      studentCount: 0,
-    });
+    setSubmitting(true);
+    try {
+      await addClass({
+        name: newClassName.trim(),
+        grade: newClassGrade,
+        teacherId: `pending-teacher-${Date.now()}`,
+        teacherName: newClassTeacherName.trim(),
+        studentCount: 0,
+      });
 
-    setNewClassName('');
-    setShowAddClass(false);
-    showToast(`班級「${newClassName}」已建立成功並同步 Firebase！`);
+      const createdName = newClassName.trim();
+      setNewClassName('');
+      setShowAddClass(false);
+      showToast(`班級「${createdName}」已建立並確認寫入資料庫！`);
+    } catch (err: any) {
+      showToast(err?.message || '建立班級失敗，請檢查權限。', 'error');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   // Student creation
   const handleCreateStudent = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!studentForm.name.trim()) return;
+    if (!studentForm.name.trim() || submitting) return;
 
     const assignedClass = classes.find((c) => c.id === studentForm.classId);
     const emailToUse = studentForm.email.trim()
       ? studentForm.email.trim()
       : `student-${assignedClass?.id || '302'}-${studentForm.studentNumber || '01'}@school.edu.tw`;
 
-    await addUser({
+    const payload: Omit<User, 'id'> = {
       name: studentForm.name.trim(),
       email: emailToUse,
       role: 'student',
@@ -150,28 +242,48 @@ export const AdminDashboard: React.FC = () => {
       status: 'active',
       passwordSet: true,
       needsActivation: false,
-    });
+    };
 
-    setStudentForm({
-      name: '',
-      email: '',
-      classId: classes[0]?.id || 'class-302',
-      studentNumber: '09',
-      avatar: '🧒',
-    });
-    setShowAddStudentModal(false);
-    showToast(`學生「${studentForm.name}」已新增成功並同步至 Firebase！`);
+    setSubmitting(true);
+    try {
+      const result = await addUser(payload);
+      if (!result.ok && result.errorCode === 'ADMIN_SDK_UNCONFIGURED') {
+        setShowAddStudentModal(false);
+        setPendingPreRegPayload({
+          data: payload,
+          reason: result.warning || '後端未配置 Firebase Admin SDK 憑證。',
+        });
+        return;
+      }
+
+      setStudentForm({
+        name: '',
+        email: '',
+        classId: defaultClassId,
+        studentNumber: '02',
+        avatar: '🧒',
+      });
+      setShowAddStudentModal(false);
+      handleMutationOutcome(result, `學生「${payload.name}」已建立並同步完成！`);
+    } catch (err: any) {
+      showToast(err?.message || '新增學生帳號失敗', 'error');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   // Teacher creation
   const handleCreateTeacher = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!teacherForm.name.trim() || !teacherForm.email.trim()) return;
+    if (!teacherForm.name.trim() || !teacherForm.email.trim() || submitting) return;
 
-    const assignedClass = teacherForm.classId === 'none' ? undefined : classes.find((c) => c.id === teacherForm.classId);
+    const assignedClass =
+      teacherForm.classId === 'none' || !teacherForm.classId
+        ? undefined
+        : classes.find((c) => c.id === teacherForm.classId);
     const hasPassword = Boolean(teacherForm.password && teacherForm.password.trim().length > 0);
 
-    await addUser({
+    const payload: Omit<User, 'id'> & { password?: string } = {
       name: teacherForm.name.trim(),
       email: teacherForm.email.trim(),
       role: 'teacher',
@@ -182,27 +294,67 @@ export const AdminDashboard: React.FC = () => {
       status: 'active',
       passwordSet: hasPassword,
       needsActivation: !hasPassword,
-    });
+      password: hasPassword ? teacherForm.password.trim() : undefined,
+    };
 
-    const teacherName = teacherForm.name;
-    setTeacherForm({
-      name: '',
-      email: '',
-      classId: classes[0]?.id || 'class-302',
-      password: '',
-      showPassword: false,
-      avatar: '👩‍🏫',
-    });
-    setShowAddTeacherModal(false);
+    setSubmitting(true);
+    try {
+      const result = await addUser(payload);
+      if (!result.ok && result.errorCode === 'ADMIN_SDK_UNCONFIGURED') {
+        setShowAddTeacherModal(false);
+        setPendingPreRegPayload({
+          data: payload,
+          reason: result.warning || '後端未配置 Firebase Admin SDK 憑證。',
+        });
+        return;
+      }
 
-    if (hasPassword) {
-      showToast(`教師「${teacherName}」已新增成功（密碼已直接設定完成）並同步 Firebase！`);
-    } else {
-      showToast(`教師「${teacherName}」已新增成功！已標記為【尚未設定密碼】，須完成安全啟用流程。`);
+      const teacherName = payload.name;
+      setTeacherForm({
+        name: '',
+        email: '',
+        classId: defaultClassId,
+        password: '',
+        showPassword: false,
+        avatar: '👩‍🏫',
+      });
+      setShowAddTeacherModal(false);
+
+      if (result.activationLink) {
+        showToast(`教師「${teacherName}」已建立（Auth + Firestore 已同步）並已產生重設密碼連結！`);
+      } else {
+        handleMutationOutcome(
+          result,
+          hasPassword
+            ? `教師「${teacherName}」已新增成功（密碼已設定並同步 Firebase Auth）！`
+            : `教師「${teacherName}」已新增！標記為【尚未設定密碼】，須完成安全啟用方可登入。`
+        );
+      }
+    } catch (err: any) {
+      showToast(err?.message || '新增教師帳號失敗', 'error');
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  // Open Edit User Modal
+  // Confirm explicit Firestore-only pre-registration fallback
+  const handleConfirmPreRegistration = async () => {
+    if (!pendingPreRegPayload || submitting) return;
+    setSubmitting(true);
+    try {
+      const result = await addUser({
+        ...pendingPreRegPayload.data,
+        firestoreOnlyFallback: true,
+      });
+      setPendingPreRegPayload(null);
+      handleMutationOutcome(result, `已建立「${pendingPreRegPayload.data.name}」Firestore 預備名冊。`);
+    } catch (err: any) {
+      showToast(err?.message || '寫入 Firestore 預備名冊失敗', 'error');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const openEditModal = (user: User) => {
     setEditingUser(user);
     setEditFormData({
@@ -216,14 +368,16 @@ export const AdminDashboard: React.FC = () => {
     });
   };
 
-  // Save Edit User
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingUser) return;
+    if (!editingUser || submitting) return;
 
-    const assignedClass = editFormData.classId === 'none' ? undefined : classes.find((c) => c.id === editFormData.classId);
+    const assignedClass =
+      editFormData.classId === 'none' || !editFormData.classId
+        ? undefined
+        : classes.find((c) => c.id === editFormData.classId);
 
-    const updates: Partial<User> = {
+    const updates: Partial<User> & { newPassword?: string; firestoreOnlyFallback?: boolean } = {
       name: editFormData.name.trim(),
       email: editFormData.email.trim(),
       avatar: editFormData.avatar,
@@ -231,42 +385,54 @@ export const AdminDashboard: React.FC = () => {
       classId: assignedClass?.id,
       className: assignedClass?.name,
       grade: assignedClass?.grade,
+      firestoreOnlyFallback: editingUser.authLinked === false,
     };
 
     if (editingUser.role === 'student') {
       updates.studentNumber = editFormData.studentNumber?.trim();
     }
 
-    if (editingUser.role === 'teacher' && editFormData.newPassword && editFormData.newPassword.trim().length > 0) {
+    if (
+      editingUser.role === 'teacher' &&
+      editFormData.newPassword &&
+      editFormData.newPassword.trim().length > 0
+    ) {
       updates.passwordSet = true;
       updates.needsActivation = false;
+      updates.newPassword = editFormData.newPassword.trim();
     }
 
-    await updateUser(editingUser.id, updates);
-    setEditingUser(null);
-    showToast(`帳號「${updates.name}」已更新完成並即時同步 Firebase！`);
+    setSubmitting(true);
+    try {
+      const result = await updateUser(editingUser.id, updates);
+      setEditingUser(null);
+      handleMutationOutcome(result, `帳號「${updates.name}」已更新並同步確認！`);
+    } catch (err: any) {
+      showToast(err?.message || '更新帳號資料失敗', 'error');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
-  // Confirm Delete
   const handleConfirmDelete = async () => {
-    if (!deletingUser) return;
-    const name = deletingUser.name;
-    await deleteUser(deletingUser.id);
-    setDeletingUser(null);
-    if (firebaseUser) {
-      showToast(`已自 Firebase 雲端資料庫永久刪除「${name}」帳號。`);
-    } else {
-      showToast(`已成功刪除「${name}」帳號資料。`);
+    if (!deletingUser || submitting) return;
+    const target = deletingUser;
+    setSubmitting(true);
+    try {
+      const result = await deleteUser(target.id, target.authLinked === false);
+      setDeletingUser(null);
+      handleMutationOutcome(result, `已永久刪除「${target.name}」帳號資料。`);
+    } catch (err: any) {
+      showToast(err?.message || '刪除帳號失敗', 'error');
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  // Filter Users
   const filteredUsers = users.filter((u) => {
-    // Category filter
     if (userCategory === 'student' && u.role !== 'student') return false;
     if (userCategory === 'teacher' && u.role !== 'teacher') return false;
 
-    // Search query
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       const matchName = u.name.toLowerCase().includes(q);
@@ -276,18 +442,12 @@ export const AdminDashboard: React.FC = () => {
       if (!matchName && !matchEmail && !matchClass && !matchNum) return false;
     }
 
-    // Class filter
-    if (selectedClassFilter !== 'all') {
-      if (u.classId !== selectedClassFilter) return false;
-    }
+    if (selectedClassFilter !== 'all' && u.classId !== selectedClassFilter) return false;
 
-    // Status filter
-    if (statusFilter === 'active') {
-      if (u.status === 'disabled') return false;
-    } else if (statusFilter === 'disabled') {
-      if (u.status !== 'disabled') return false;
-    } else if (statusFilter === 'needsActivation') {
-      if (!u.needsActivation && u.passwordSet !== false) return false;
+    if (statusFilter === 'active' && u.status === 'disabled') return false;
+    if (statusFilter === 'disabled' && u.status !== 'disabled') return false;
+    if (statusFilter === 'needsActivation' && !u.needsActivation && u.passwordSet !== false) {
+      return false;
     }
 
     return true;
@@ -295,16 +455,36 @@ export const AdminDashboard: React.FC = () => {
 
   const studentsCount = users.filter((u) => u.role === 'student').length;
   const teachersCount = users.filter((u) => u.role === 'teacher').length;
-  const unactivatedTeachersCount = users.filter((u) => u.role === 'teacher' && (u.needsActivation || !u.passwordSet)).length;
+  const unactivatedTeachersCount = users.filter(
+    (u) => u.role === 'teacher' && (u.needsActivation || !u.passwordSet)
+  ).length;
   const disabledUsersCount = users.filter((u) => u.status === 'disabled').length;
+
+  const legacyUsersPresent = users.filter((u) => LEGACY_PRESET_USER_IDS.includes(u.id));
+
+  if (currentUser?.role !== 'admin') {
+    return null;
+  }
 
   return (
     <div className="space-y-6">
       {/* Toast Notification */}
-      {toastMessage && (
-        <div className="fixed top-20 right-6 z-50 p-4 bg-teal-900 text-white rounded-2xl shadow-xl flex items-center gap-3 border border-teal-700 animate-in fade-in slide-in-from-top-2">
-          <CheckCircle className="w-5 h-5 text-teal-400 shrink-0" />
-          <span className="text-xs font-bold">{toastMessage}</span>
+      {toast && (
+        <div
+          className={`fixed top-20 right-6 z-50 max-w-md p-4 rounded-2xl shadow-xl flex items-start gap-3 border animate-in fade-in slide-in-from-top-2 ${
+            toast.type === 'error'
+              ? 'bg-rose-900 text-white border-rose-700'
+              : toast.type === 'warning'
+              ? 'bg-amber-900 text-white border-amber-700'
+              : 'bg-teal-900 text-white border-teal-700'
+          }`}
+        >
+          {toast.type === 'error' || toast.type === 'warning' ? (
+            <AlertTriangle className="w-5 h-5 text-amber-300 shrink-0 mt-0.5" />
+          ) : (
+            <CheckCircle className="w-5 h-5 text-teal-400 shrink-0 mt-0.5" />
+          )}
+          <span className="text-xs font-bold leading-relaxed">{toast.message}</span>
         </div>
       )}
 
@@ -322,14 +502,14 @@ export const AdminDashboard: React.FC = () => {
         </div>
 
         <div className="bg-white p-5 rounded-3xl border border-teal-100 shadow-2xs">
-          <span className="text-xs font-bold text-slate-500">模擬學生總數</span>
+          <span className="text-xs font-bold text-slate-500">學生總數</span>
           <div className="mt-2 flex items-baseline gap-2">
             <span className="text-3xl font-black text-teal-600">{studentsCount}</span>
             <span className="text-xs text-slate-500">位同學</span>
           </div>
           <div className="flex items-center gap-1 text-[11px] text-slate-400 mt-2">
             <GraduationCap className="w-3.5 h-3.5 text-teal-500" />
-            <span>雲端 Firestore 同步儲存</span>
+            <span>{appMode === 'cloud' ? '雲端 Firestore 同步中' : '離線沙盒試用資料'}</span>
           </div>
         </div>
 
@@ -353,15 +533,13 @@ export const AdminDashboard: React.FC = () => {
         </div>
 
         <div className="bg-white p-5 rounded-3xl border border-teal-100 shadow-2xs">
-          <span className="text-xs font-bold text-slate-500">帳號安全防護狀態</span>
+          <span className="text-xs font-bold text-slate-500">帳號停用管理</span>
           <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-3xl font-black text-slate-800">
-              {disabledUsersCount > 0 ? disabledUsersCount : '0'}
-            </span>
+            <span className="text-3xl font-black text-slate-800">{disabledUsersCount}</span>
             <span className="text-xs text-slate-500">組已停用帳號</span>
           </div>
           <div className="flex items-center gap-1 text-[11px] text-purple-700 mt-2 font-medium">
-            <ShieldCheck className="w-3.5 h-3.5" /> Firebase ABAC 即時阻斷
+            <ShieldCheck className="w-3.5 h-3.5" /> 停用帳號自動阻斷登入與 API
           </div>
         </div>
       </div>
@@ -369,6 +547,7 @@ export const AdminDashboard: React.FC = () => {
       {/* Admin Tabs */}
       <div className="flex items-center gap-2 bg-white/80 backdrop-blur-md p-2 rounded-2xl border border-teal-100 shadow-2xs overflow-x-auto no-scrollbar">
         <button
+          type="button"
           onClick={() => setActiveTab('users')}
           className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all shrink-0 ${
             activeTab === 'users'
@@ -379,6 +558,18 @@ export const AdminDashboard: React.FC = () => {
           <Users className="w-4 h-4" /> 使用者管理 ({users.length})
         </button>
         <button
+          type="button"
+          onClick={() => setActiveTab('chat_viewer')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all shrink-0 ${
+            activeTab === 'chat_viewer'
+              ? 'bg-teal-600 text-white shadow-xs shadow-teal-600/20'
+              : 'text-slate-600 hover:text-teal-700 hover:bg-teal-50/60'
+          }`}
+        >
+          <MessageSquare className="w-4 h-4" /> 學生 AI 對話紀錄
+        </button>
+        <button
+          type="button"
           onClick={() => setActiveTab('classes')}
           className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all shrink-0 ${
             activeTab === 'classes'
@@ -389,6 +580,18 @@ export const AdminDashboard: React.FC = () => {
           <Layers className="w-4 h-4" /> 班級管理 ({classes.length})
         </button>
         <button
+          type="button"
+          onClick={() => setActiveTab('ai_monitor')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all shrink-0 ${
+            activeTab === 'ai_monitor'
+              ? 'bg-teal-600 text-white shadow-xs shadow-teal-600/20'
+              : 'text-slate-600 hover:text-teal-700 hover:bg-teal-50/60'
+          }`}
+        >
+          <Activity className="w-4 h-4" /> AI 額度與服務監控
+        </button>
+        <button
+          type="button"
           onClick={() => setActiveTab('sandbox')}
           className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all shrink-0 ${
             activeTab === 'sandbox'
@@ -396,31 +599,32 @@ export const AdminDashboard: React.FC = () => {
               : 'text-slate-600 hover:text-teal-700 hover:bg-teal-50/60'
           }`}
         >
-          <Database className="w-4 h-4" /> 模擬資料測試沙盒
+          <Database className="w-4 h-4" /> 模擬資料與測試管理
         </button>
       </div>
 
-      {/* Tab 1: User Management (使用者管理) */}
+      {/* Tab 1: User Management */}
       {activeTab === 'users' && (
         <div className="bg-white rounded-3xl p-6 border border-teal-100 shadow-2xs space-y-6">
-          {/* Header & Quick Action Buttons */}
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-100">
             <div>
               <h3 className="text-lg font-black text-slate-800 flex items-center gap-2">
                 <Users className="w-5 h-5 text-teal-600" /> 校園使用者與帳號權限管理
               </h3>
               <p className="text-xs text-slate-400 mt-1">
-                支援學生及教師帳號之新增、修改、停用與刪除，所有操作皆即時雙向同步至 Firebase 雲端資料庫。
+                透過受保護的後端 API 與 Firebase Authentication / Firestore 同步管理帳號生命週期。
               </p>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-2 shrink-0 flex-wrap">
               <button
+                type="button"
                 onClick={() => setShowAddStudentModal(true)}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold shadow-xs transition-all hover:scale-[1.02]"
               >
                 <Plus className="w-3.5 h-3.5" /> 新增學生帳號
               </button>
               <button
+                type="button"
                 onClick={() => setShowAddTeacherModal(true)}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold shadow-xs transition-all hover:scale-[1.02]"
               >
@@ -429,10 +633,37 @@ export const AdminDashboard: React.FC = () => {
             </div>
           </div>
 
-          {/* Sub-view switcher: 學生 / 教師 / 全部 */}
+          {legacyUsersPresent.length > 0 && (
+            <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="text-xs text-amber-900">
+                <strong>偵測到 {legacyUsersPresent.length} 筆舊版預設測試帳號：</strong>
+                可一鍵清除先前匯入的多餘測試資料，僅保留精簡預設（學生、教師、管理員各 1 位）與真實註冊帳號。
+              </div>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={async () => {
+                  setSubmitting(true);
+                  try {
+                    const res = await cleanupLegacyPresetUsers();
+                    showToast(`已清理 ${res.deletedUsers} 筆舊版預設使用者與 ${res.deletedClasses} 個舊版測試班級！`);
+                  } catch (err: any) {
+                    showToast(err?.message || '清理舊版預設資料失敗', 'error');
+                  } finally {
+                    setSubmitting(false);
+                  }
+                }}
+                className="shrink-0 px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-bold shadow-xs"
+              >
+                清理舊版預設測試帳號
+              </button>
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-2xl text-xs font-bold">
               <button
+                type="button"
                 onClick={() => {
                   setUserCategory('student');
                   setStatusFilter('all');
@@ -447,6 +678,7 @@ export const AdminDashboard: React.FC = () => {
                 學生帳號名冊 ({studentsCount})
               </button>
               <button
+                type="button"
                 onClick={() => {
                   setUserCategory('teacher');
                   setStatusFilter('all');
@@ -466,6 +698,7 @@ export const AdminDashboard: React.FC = () => {
                 )}
               </button>
               <button
+                type="button"
                 onClick={() => {
                   setUserCategory('all');
                   setStatusFilter('all');
@@ -481,7 +714,6 @@ export const AdminDashboard: React.FC = () => {
               </button>
             </div>
 
-            {/* Status & Class Filter Bar */}
             <div className="flex flex-wrap items-center gap-2">
               <div className="relative">
                 <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -494,7 +726,6 @@ export const AdminDashboard: React.FC = () => {
                 />
               </div>
 
-              {/* Class filter (mainly for students or teachers) */}
               <select
                 value={selectedClassFilter}
                 onChange={(e) => setSelectedClassFilter(e.target.value)}
@@ -508,7 +739,6 @@ export const AdminDashboard: React.FC = () => {
                 ))}
               </select>
 
-              {/* Status filter */}
               <select
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value as any)}
@@ -524,13 +754,12 @@ export const AdminDashboard: React.FC = () => {
             </div>
           </div>
 
-          {/* User Table */}
           <div className="overflow-x-auto rounded-2xl border border-slate-100">
             <table className="w-full text-left text-xs">
               <thead>
                 <tr className="bg-slate-50/80 border-b border-slate-100 text-slate-500 font-bold tracking-wider">
                   <th className="py-3 px-3">身分資訊</th>
-                  <th className="py-3 px-3">帳號信箱</th>
+                  <th className="py-3 px-3">帳號信箱與 Auth 綁定</th>
                   <th className="py-3 px-3">所屬班級 / 職務</th>
                   <th className="py-3 px-3">密碼與安全狀態</th>
                   <th className="py-3 px-3">帳號啟用狀態</th>
@@ -549,6 +778,7 @@ export const AdminDashboard: React.FC = () => {
                     const isUserDisabled = user.status === 'disabled';
                     const isTeacherNeedsActivation =
                       user.role === 'teacher' && (user.needsActivation || user.passwordSet === false);
+                    const isSelf = currentUser?.id === user.id;
 
                     return (
                       <tr
@@ -557,7 +787,6 @@ export const AdminDashboard: React.FC = () => {
                           isUserDisabled ? 'bg-slate-50/50 opacity-75' : ''
                         }`}
                       >
-                        {/* Avatar & Name */}
                         <td className="py-3 px-3">
                           <div className="flex items-center gap-2.5">
                             <span className="text-xl shrink-0 p-1 bg-slate-100 rounded-xl">
@@ -573,18 +802,30 @@ export const AdminDashboard: React.FC = () => {
                                 )}
                               </div>
                               <span className="text-[10px] text-slate-400 font-mono">
-                                UID: {user.id.substring(0, 16)}...
+                                UID: {user.id.substring(0, 16)}
+                                {user.id.length > 16 ? '...' : ''}
                               </span>
                             </div>
                           </div>
                         </td>
 
-                        {/* Email */}
-                        <td className="py-3 px-3 font-mono text-[11px] text-slate-600">
-                          {user.email || '無電子信箱'}
+                        <td className="py-3 px-3">
+                          <div className="font-mono text-[11px] text-slate-600">
+                            {user.email || '無電子信箱'}
+                          </div>
+                          <div className="mt-1">
+                            {user.authLinked ? (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold">
+                                <Link2 className="w-2.5 h-2.5" /> Auth UID 已綁定
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 border border-slate-200 text-[10px] font-medium">
+                                僅名冊 / 待登入綁定
+                              </span>
+                            )}
+                          </div>
                         </td>
 
-                        {/* Class / Role */}
                         <td className="py-3 px-3">
                           {user.role === 'student' ? (
                             <div>
@@ -596,11 +837,9 @@ export const AdminDashboard: React.FC = () => {
                               )}
                             </div>
                           ) : user.role === 'teacher' ? (
-                            <div>
-                              <span className="inline-block px-2 py-0.5 rounded-lg bg-sky-50 text-sky-800 font-semibold text-[11px] border border-sky-100">
-                                {user.className ? `${user.className} 責任導師` : '專任教師 / 輔導老師'}
-                              </span>
-                            </div>
+                            <span className="inline-block px-2 py-0.5 rounded-lg bg-sky-50 text-sky-800 font-semibold text-[11px] border border-sky-100">
+                              {user.className ? `${user.className} 責任導師` : '專任教師 / 輔導老師'}
+                            </span>
                           ) : (
                             <span className="inline-block px-2 py-0.5 rounded-lg bg-purple-50 text-purple-800 font-semibold text-[11px] border border-purple-100">
                               系統管理員 (Admin)
@@ -608,7 +847,6 @@ export const AdminDashboard: React.FC = () => {
                           )}
                         </td>
 
-                        {/* Password & Security Status */}
                         <td className="py-3 px-3">
                           {user.role === 'teacher' ? (
                             isTeacherNeedsActivation ? (
@@ -621,7 +859,6 @@ export const AdminDashboard: React.FC = () => {
                                   type="button"
                                   onClick={() => setActivatingUser(user)}
                                   className="text-[11px] text-sky-600 hover:text-sky-800 hover:underline font-bold"
-                                  title="查看安全啟用通知或協助啟用"
                                 >
                                   安全啟用
                                 </button>
@@ -633,11 +870,10 @@ export const AdminDashboard: React.FC = () => {
                               </span>
                             )
                           ) : (
-                            <span className="text-slate-400 text-[11px]">一般學生憑證</span>
+                            <span className="text-slate-400 text-[11px]">標準校園登入</span>
                           )}
                         </td>
 
-                        {/* Active / Disabled Status */}
                         <td className="py-3 px-3">
                           {isUserDisabled ? (
                             <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
@@ -650,11 +886,10 @@ export const AdminDashboard: React.FC = () => {
                           )}
                         </td>
 
-                        {/* Actions */}
                         <td className="py-3 px-3 text-right">
                           <div className="flex items-center justify-end gap-1.5">
-                            {/* Edit Button */}
                             <button
+                              type="button"
                               onClick={() => openEditModal(user)}
                               className="p-1.5 text-slate-500 hover:text-teal-700 hover:bg-teal-50 rounded-lg transition-colors"
                               title="修改使用者資料"
@@ -662,32 +897,39 @@ export const AdminDashboard: React.FC = () => {
                               <Edit2 className="w-4 h-4" />
                             </button>
 
-                            {/* Toggle Disable/Enable Button */}
                             <button
+                              type="button"
+                              disabled={isSelf}
                               onClick={async () => {
                                 const newStatus = isUserDisabled ? 'active' : 'disabled';
-                                await toggleUserStatus(user.id, newStatus);
-                                showToast(
-                                  `已將「${user.name}」帳號設定為【${
-                                    newStatus === 'active' ? '正常啟用' : '停用'
-                                  }】，並同步 Firebase。`
-                                );
+                                try {
+                                  const res = await toggleUserStatus(user.id, newStatus);
+                                  handleMutationOutcome(
+                                    res,
+                                    `已將「${user.name}」設定為【${
+                                      newStatus === 'active' ? '正常啟用' : '停用'
+                                    }】！`
+                                  );
+                                } catch (err: any) {
+                                  showToast(err?.message || '變更狀態失敗', 'error');
+                                }
                               }}
-                              className={`p-1.5 rounded-lg transition-colors ${
+                              className={`p-1.5 rounded-lg transition-colors disabled:opacity-30 ${
                                 isUserDisabled
                                   ? 'text-emerald-600 hover:bg-emerald-50'
                                   : 'text-amber-600 hover:bg-amber-50'
                               }`}
-                              title={isUserDisabled ? '重新啟用此帳號' : '停用此帳號'}
+                              title={isSelf ? '不可停用自己的管理員帳號' : isUserDisabled ? '重新啟用此帳號' : '停用此帳號'}
                             >
                               {isUserDisabled ? <UserCheck className="w-4 h-4" /> : <UserX className="w-4 h-4" />}
                             </button>
 
-                            {/* Delete Button */}
                             <button
+                              type="button"
+                              disabled={isSelf}
                               onClick={() => setDeletingUser(user)}
-                              className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors"
-                              title="刪除帳號"
+                              className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors disabled:opacity-30"
+                              title={isSelf ? '不可刪除自己的管理員帳號' : '刪除帳號'}
                             >
                               <Trash2 className="w-4 h-4" />
                             </button>
@@ -703,7 +945,37 @@ export const AdminDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Tab 2: Class Management */}
+      {/* Tab 2: Student AI Chat Viewer (Admin School-wide Access) */}
+      {activeTab === 'chat_viewer' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-3xl p-4 sm:p-5 border border-teal-100 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm sm:text-base font-black text-slate-800">
+                全校學生 AI 對話紀錄篩選（管理員端）
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                依系統授權政策，管理員可查閱全校所有班級學生與心心 AI 的談話內容與稽核日誌。
+              </p>
+            </div>
+            <select
+              value={adminChatClassFilter}
+              onChange={(e) => setAdminChatClassFilter(e.target.value)}
+              className="px-3.5 py-2 rounded-xl bg-slate-100 border border-slate-200 text-xs sm:text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-500"
+            >
+              <option value="all">全校所有班級</option>
+              {classes.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} ({c.grade})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <StudentAIChatViewer selectedClassId={adminChatClassFilter} />
+        </div>
+      )}
+
+      {/* Tab 3: Class Management */}
       {activeTab === 'classes' && (
         <div className="bg-white rounded-3xl p-6 border border-teal-100 shadow-2xs">
           <div className="flex items-center justify-between mb-5">
@@ -714,6 +986,7 @@ export const AdminDashboard: React.FC = () => {
               </p>
             </div>
             <button
+              type="button"
               onClick={() => setShowAddClass(true)}
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold shadow-md shadow-teal-600/20 transition-all hover:scale-[1.02]"
             >
@@ -721,7 +994,6 @@ export const AdminDashboard: React.FC = () => {
             </button>
           </div>
 
-          {/* Add Class Inline Form Modal */}
           {showAddClass && (
             <form
               onSubmit={handleCreateClass}
@@ -777,15 +1049,15 @@ export const AdminDashboard: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 rounded-xl bg-teal-600 text-white text-xs font-bold hover:bg-teal-700 shadow-xs"
+                  disabled={submitting}
+                  className="px-4 py-1.5 rounded-xl bg-teal-600 text-white text-xs font-bold hover:bg-teal-700 shadow-xs disabled:opacity-50"
                 >
-                  確認建立
+                  {submitting ? '建立中...' : '確認建立'}
                 </button>
               </div>
             </form>
           )}
 
-          {/* Classes Grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {classes.map((cls) => {
               const studentsInThisClass = users.filter((u) => u.classId === cls.id && u.role === 'student');
@@ -815,80 +1087,198 @@ export const AdminDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Tab 3: Mock Data Sandbox & Testing */}
+      {/* Tab 3: AI Usage & Cost Monitor */}
+      {activeTab === 'ai_monitor' && (
+        <div className="bg-white rounded-3xl p-6 border border-teal-100 shadow-2xs space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
+            <div>
+              <h3 className="text-lg font-black text-slate-800 flex items-center gap-2">
+                <Activity className="w-5 h-5 text-teal-600" />
+                Gemini AI 呼叫額度、Token 監控與系統整合狀態
+              </h3>
+              <p className="text-xs text-slate-500 mt-1">
+                即時檢視伺服器端速率限制（Rate Limiting）、每日配額與 Firebase Admin SDK 配置狀況。
+              </p>
+            </div>
+            {appMode === 'cloud' && (
+              <button
+                type="button"
+                onClick={loadAiUsage}
+                disabled={loadingUsage}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-teal-50 hover:bg-teal-100 text-teal-800 text-xs font-bold border border-teal-200 transition-colors"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingUsage ? 'animate-spin' : ''}`} />
+                重新整理監控數據
+              </button>
+            )}
+          </div>
+
+          {appMode !== 'cloud' ? (
+            <div className="p-6 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
+              目前為離線沙盒試用模式。請登入正式雲端管理員帳號以查詢後端即時請求與 Token 使用量。
+            </div>
+          ) : !aiUsage ? (
+            <div className="p-6 rounded-2xl bg-slate-50 border border-slate-200 text-xs text-slate-500 text-center">
+              {loadingUsage ? '正在載入後端監控資料...' : '無法取得監控數據，請確認管理員憑證有效。'}
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                <div className="p-4 rounded-2xl bg-teal-50/70 border border-teal-100">
+                  <span className="text-slate-500 block font-bold">目前使用模型</span>
+                  <span className="text-base font-black text-teal-900 font-mono mt-1 block">
+                    {aiUsage.model}
+                  </span>
+                </div>
+                <div className="p-4 rounded-2xl bg-sky-50/70 border border-sky-100">
+                  <span className="text-slate-500 block font-bold">今日 API 請求次數</span>
+                  <span className="text-xl font-black text-sky-900 mt-1 block">
+                    {aiUsage.totalRequestsToday} 次
+                  </span>
+                  <span className="text-[11px] text-sky-700">
+                    成功 {aiUsage.successfulRequestsToday} / 失敗 {aiUsage.failedRequestsToday}
+                  </span>
+                </div>
+                <div className="p-4 rounded-2xl bg-emerald-50/70 border border-emerald-100">
+                  <span className="text-slate-500 block font-bold">今日消耗 Tokens</span>
+                  <span className="text-xl font-black text-emerald-900 mt-1 block">
+                    {(aiUsage.totalPromptTokensToday + aiUsage.totalOutputTokensToday).toLocaleString()}
+                  </span>
+                  <span className="text-[11px] text-emerald-700">
+                    輸入 {aiUsage.totalPromptTokensToday.toLocaleString()} · 輸出 {aiUsage.totalOutputTokensToday.toLocaleString()}
+                  </span>
+                </div>
+                <div className="p-4 rounded-2xl bg-purple-50/70 border border-purple-100">
+                  <span className="text-slate-500 block font-bold">單人配額保護</span>
+                  <span className="text-xl font-black text-purple-900 mt-1 block">
+                    {aiUsage.dailyLimitPerUser} 則/日
+                  </span>
+                  <span className="text-[11px] text-purple-700">
+                    每分鐘上限 {aiUsage.minuteLimitPerUser} 則（今日活躍 {aiUsage.activeUsersToday} 人）
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50/60 flex items-center justify-between">
+                  <div>
+                    <span className="font-bold text-slate-800 block">GEMINI_API_KEY 後端狀態</span>
+                    <span className="text-[11px] text-slate-500">僅存於伺服器端環境變數，前端絕不暴露</span>
+                  </div>
+                  <span
+                    className={`px-2.5 py-1 rounded-full font-bold ${
+                      aiUsage.geminiKeyConfigured
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : 'bg-rose-100 text-rose-800'
+                    }`}
+                  >
+                    {aiUsage.geminiKeyConfigured ? '已設定啟用' : '尚未設定'}
+                  </span>
+                </div>
+
+                <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50/60 flex items-center justify-between">
+                  <div>
+                    <span className="font-bold text-slate-800 block">Firebase Admin SDK 狀態</span>
+                    <span className="text-[11px] text-slate-500">
+                      需設定 FIREBASE_SERVICE_ACCOUNT_JSON 方可由後端直接建立/停用/刪除 Auth 帳號
+                    </span>
+                  </div>
+                  <span
+                    className={`px-2.5 py-1 rounded-full font-bold ${
+                      aiUsage.adminSdkReady
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : 'bg-amber-100 text-amber-800'
+                    }`}
+                  >
+                    {aiUsage.adminSdkReady ? 'Admin SDK 就緒' : '尚未配置憑證'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Tab 4: Mock Data Sandbox & Testing */}
       {activeTab === 'sandbox' && (
         <div className="bg-white rounded-3xl p-6 sm:p-8 border border-teal-100 shadow-2xs space-y-6">
           <div>
             <h3 className="text-lg font-extrabold text-slate-800 flex items-center gap-2">
-              <Database className="w-5 h-5 text-teal-600" /> 模擬學生資料沙盒與合規聲明
+              <Database className="w-5 h-5 text-teal-600" /> 模擬測試資料管理與隱私聲明
             </h3>
             <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-              依據校園隱私與資安保護原則，系統內所有學生姓名、學號與筆記均為<strong>合成模擬數據</strong>，絕不包含任何真實學生個人資料。
+              正式雲端模式與沙盒離線試用模式完全隔離。以下工具僅匯入合成模擬班級與測試學生，絕不覆蓋已註冊之真實管理員或使用者帳號。
             </p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="p-5 rounded-2xl bg-teal-50/70 border border-teal-200">
               <h4 className="font-bold text-teal-900 text-sm mb-2">
-                🔄 重置為預設測試數據
+                {appMode === 'cloud' ? '📥 匯入合成範例班級與學生至 Firestore' : '🔄 重置離線沙盒測試數據'}
               </h4>
               <p className="text-xs text-teal-800 mb-4 leading-relaxed">
-                將班級名單、簽到紀錄、AI 聊天紀錄與關懷筆記重置為最初的示範狀態（包含三年二班 8 位同學與各類情緒分布）。
+                {appMode === 'cloud'
+                  ? '以 merge 模式寫入示範班級（三年二班、五年一班）、模擬學生名單與心情範例至雲端資料庫，不會刪除或覆蓋現有真實帳號。'
+                  : '將目前離線沙盒記憶體中的班級、簽到、對話與關懷筆記還原為最初示範狀態。'}
               </p>
-              <button
-                onClick={() => {
-                  resetAllData();
-                  showToast('已成功還原為初始模擬資料庫！');
-                }}
-                className="inline-flex items-center gap-1.5 px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-bold shadow-xs transition-colors"
-              >
-                <RefreshCw className="w-3.5 h-3.5" /> 立即重置資料
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={async () => {
+                    if (appMode === 'cloud') {
+                      setSubmitting(true);
+                      try {
+                        await seedSandboxIntoFirestore();
+                        showToast('已成功將精簡示範班級與學生／教師資料寫入 Firestore（未覆蓋真實帳號）！');
+                      } catch (err: any) {
+                        showToast(err?.message || '匯入範例資料失敗', 'error');
+                      } finally {
+                        setSubmitting(false);
+                      }
+                    } else {
+                      resetSandboxData();
+                      showToast('已還原離線沙盒測試資料！');
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-xs transition-colors"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  {appMode === 'cloud' ? '匯入精簡範例資料（1師1生）' : '立即重置沙盒資料'}
+                </button>
+
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={async () => {
+                    setSubmitting(true);
+                    try {
+                      const res = await cleanupLegacyPresetUsers();
+                      showToast(`已清除舊版多餘預設帳號（使用者 ${res.deletedUsers} 筆、班級 ${res.deletedClasses} 筆）！`);
+                    } catch (err: any) {
+                      showToast(err?.message || '清除舊版預設資料失敗', 'error');
+                    } finally {
+                      setSubmitting(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-xs transition-colors"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  清除舊版多餘預設帳號
+                </button>
+              </div>
             </div>
 
             <div className="p-5 rounded-2xl bg-sky-50/70 border border-sky-200">
               <h4 className="font-bold text-sky-900 text-sm mb-2">
-                🛡️ 學生個資保護機制 (FERPA / 校園隱私)
+                🛡️ 學生個資保護機制與安全邊界
               </h4>
               <p className="text-xs text-sky-800 mb-2 leading-relaxed">
-                • 輔導關懷筆記 (Care Notes) 僅限班導師與管理員端存取，學生端不可見。
+                • 只有管理員端能刪除或修改現有學生端與教師端的使用者資料（前後端與 Firestore Rules 同步鎖定）。
               </p>
               <p className="text-xs text-sky-800 leading-relaxed">
-                • Firestore 安全規則嚴格實施 ABAC (基於屬性之存取控制)，防範未授權越權讀取。
+                • 教師端與管理員端皆可依法授權查閱學生與 AI 的談話內容，每次查閱均寫入 <code>chat_access_logs</code> 稽核日誌。
               </p>
-            </div>
-
-            <div className="p-5 rounded-2xl bg-amber-50/70 border border-amber-200 md:col-span-2">
-              <h4 className="font-bold text-amber-900 text-sm mb-2 flex items-center gap-1.5">
-                <Clock className="w-4 h-4 text-amber-600" />
-                ⏳ 對話資料保存期限與清理機制 (Data Retention Policy)
-              </h4>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs text-amber-900 mb-3">
-                <div className="bg-white p-3 rounded-xl border border-amber-200">
-                  <span className="text-slate-400 block text-[10px] font-bold">法定保存期限</span>
-                  <span className="font-bold text-sm">1 學年 (365 天)</span>
-                </div>
-                <div className="bg-white p-3 rounded-xl border border-amber-200">
-                  <span className="text-slate-400 block text-[10px] font-bold">權利行使管道</span>
-                  <span className="font-bold text-sm">法定代理人可請求刪除</span>
-                </div>
-                <div className="bg-white p-3 rounded-xl border border-amber-200">
-                  <span className="text-slate-400 block text-[10px] font-bold">Firestore 存取鎖定</span>
-                  <span className="font-bold text-sm">僅限管理員執行清除</span>
-                </div>
-              </div>
-              <p className="text-xs text-amber-800 mb-3 leading-relaxed">
-                學期結束後，系統管理員可依學校校園個資安全規範，一鍵執行過期對話資料去識別化與封存，或永久清除超過 365 天之對話紀錄。
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  showToast('已完成檢查：目前所有對話皆在 365 天有效保存期限內，無逾期紀錄。');
-                }}
-                className="inline-flex items-center gap-1.5 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold shadow-xs transition-colors"
-              >
-                <Trash2 className="w-3.5 h-3.5" /> 執行逾期對話清理檢查 (Retention Purge)
-              </button>
             </div>
           </div>
         </div>
@@ -896,11 +1286,12 @@ export const AdminDashboard: React.FC = () => {
 
       {/* ================= MODALS ================= */}
 
-      {/* Modal 1: Add Student Modal */}
+      {/* Modal 1: Add Student */}
       {showAddStudentModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs animate-in fade-in">
           <div className="bg-white rounded-3xl max-w-lg w-full p-6 border border-teal-100 shadow-2xl relative">
             <button
+              type="button"
               onClick={() => setShowAddStudentModal(false)}
               className="absolute top-5 right-5 text-slate-400 hover:text-slate-600 p-1"
             >
@@ -913,7 +1304,7 @@ export const AdminDashboard: React.FC = () => {
               </span>
               <div>
                 <h3 className="text-base font-extrabold text-slate-800">新增學生帳號</h3>
-                <p className="text-xs text-slate-400">建立學生檔案並即時同步至 Firebase Firestore</p>
+                <p className="text-xs text-slate-400">建立 Firebase Auth 與 Firestore 學生檔案</p>
               </div>
             </div>
 
@@ -1004,9 +1395,10 @@ export const AdminDashboard: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold shadow-xs"
+                  disabled={submitting}
+                  className="px-5 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white text-xs font-bold shadow-xs"
                 >
-                  確認建立學生帳號
+                  {submitting ? '同步建立中...' : '確認建立學生帳號'}
                 </button>
               </div>
             </form>
@@ -1014,11 +1406,12 @@ export const AdminDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Modal 2: Add Teacher Modal (with Password Field Requirement) */}
+      {/* Modal 2: Add Teacher */}
       {showAddTeacherModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs animate-in fade-in">
           <div className="bg-white rounded-3xl max-w-lg w-full p-6 border border-sky-100 shadow-2xl relative">
             <button
+              type="button"
               onClick={() => setShowAddTeacherModal(false)}
               className="absolute top-5 right-5 text-slate-400 hover:text-slate-600 p-1"
             >
@@ -1080,12 +1473,11 @@ export const AdminDashboard: React.FC = () => {
                 </select>
               </div>
 
-              {/* Requirement #3: 設定密碼 (選填；不填時標記為尚未設定密碼，須完成安全啟用才能登入) */}
               <div className="p-3.5 bg-sky-50/70 border border-sky-200 rounded-2xl space-y-2">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-bold text-sky-950 flex items-center gap-1.5">
                     <Lock className="w-3.5 h-3.5 text-sky-700" />
-                    設定初始登入密碼 <span className="text-slate-400 font-normal">(選填)</span>
+                    設定初始登入密碼 <span className="text-slate-400 font-normal">(選填，至少 6 碼)</span>
                   </label>
                   <span className="text-[10px] text-sky-700 font-medium">允許留空不填</span>
                 </div>
@@ -1108,9 +1500,9 @@ export const AdminDashboard: React.FC = () => {
                 </div>
 
                 <p className="text-[11px] text-sky-800 leading-relaxed">
-                  💡 <strong>安全啟用機制說明：</strong> 若此處留空不填，系統將自動將該帳號標記為
+                  💡 <strong>安全啟用機制說明：</strong> 若留空不填，帳號將標記為
                   <span className="text-amber-700 font-bold">【尚未設定密碼】</span>
-                  。教師必須透過安全啟用通知完成啟用流程後方可登入系統。
+                  ，必須完成安全啟用方可進入教師後台。
                 </p>
               </div>
 
@@ -1144,9 +1536,10 @@ export const AdminDashboard: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold shadow-xs"
+                  disabled={submitting}
+                  className="px-5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-xs font-bold shadow-xs"
                 >
-                  確認建立教師帳號
+                  {submitting ? '同步建立中...' : '確認建立教師帳號'}
                 </button>
               </div>
             </form>
@@ -1154,11 +1547,60 @@ export const AdminDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Modal 3: Edit User Modal (修改學生 / 教師資料) */}
+      {/* Modal: Explicit Pre-registration Choice when Firebase Admin SDK is unconfigured */}
+      {pendingPreRegPayload && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 border border-amber-200 shadow-2xl space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 bg-amber-100 text-amber-700 rounded-xl shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-extrabold text-slate-800">
+                  無法自動同步建立 Firebase Authentication 帳號
+                </h3>
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                  {pendingPreRegPayload.reason}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 text-xs text-slate-700 space-y-1">
+              <p>
+                <strong>待建立對象：</strong> {pendingPreRegPayload.data.name}（{pendingPreRegPayload.data.email}）
+              </p>
+              <p className="text-[11px] text-slate-500">
+                若您尚未在伺服器端設定 <code>FIREBASE_SERVICE_ACCOUNT_JSON</code>，您仍可先儲存至 Firestore 預備名冊（標記為 <code>authLinked: false</code>），待環境變數設定完成或請使用者以 Google 登入後綁定。
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setPendingPreRegPayload(null)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:bg-slate-100"
+              >
+                取消建立
+              </button>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={handleConfirmPreRegistration}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-bold"
+              >
+                {submitting ? '寫入中...' : '仍先建立 Firestore 預備名冊 (authLinked: false)'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal 3: Edit User */}
       {editingUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs animate-in fade-in">
           <div className="bg-white rounded-3xl max-w-lg w-full p-6 border border-slate-200 shadow-2xl relative">
             <button
+              type="button"
               onClick={() => setEditingUser(null)}
               className="absolute top-5 right-5 text-slate-400 hover:text-slate-600 p-1"
             >
@@ -1242,12 +1684,11 @@ export const AdminDashboard: React.FC = () => {
                 )}
               </div>
 
-              {/* Password update for teacher */}
               {editingUser.role === 'teacher' && (
                 <div className="p-3 bg-slate-50 border border-slate-200 rounded-2xl space-y-1">
                   <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
                     <KeyRound className="w-3.5 h-3.5 text-slate-500" />
-                    重設登入密碼 (選填)
+                    重設登入密碼 (選填，至少 6 碼)
                   </label>
                   <input
                     type="password"
@@ -1257,7 +1698,7 @@ export const AdminDashboard: React.FC = () => {
                     className="w-full px-3 py-1.5 text-xs rounded-xl border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-teal-500"
                   />
                   <p className="text-[10px] text-slate-400">
-                    填入新密碼並儲存後，該教師將自動完成密碼設定並解除啟用待辦標記。
+                    若後端已設定 Admin SDK 憑證，將同步更新 Firebase Auth 密碼。
                   </p>
                 </div>
               )}
@@ -1272,9 +1713,10 @@ export const AdminDashboard: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold shadow-xs"
+                  disabled={submitting}
+                  className="px-5 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white text-xs font-bold shadow-xs"
                 >
-                  儲存修改並同步 Firebase
+                  {submitting ? '同步儲存中...' : '儲存修改'}
                 </button>
               </div>
             </form>
@@ -1282,11 +1724,12 @@ export const AdminDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Modal 4: Teacher Security Activation Link Modal */}
+      {/* Modal 4: Teacher Security Activation Link */}
       {activatingUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs animate-in fade-in">
           <div className="bg-white rounded-3xl max-w-lg w-full p-6 border border-amber-200 shadow-2xl relative">
             <button
+              type="button"
               onClick={() => {
                 setActivatingUser(null);
                 setCopiedLink(false);
@@ -1304,41 +1747,43 @@ export const AdminDashboard: React.FC = () => {
                 <h3 className="text-base font-extrabold text-slate-800">
                   教師安全啟用流程：{activatingUser.name}
                 </h3>
-                <p className="text-xs text-amber-700 font-semibold">此教師帳號建立時未填寫密碼，標記為尚未啟用</p>
+                <p className="text-xs text-amber-700 font-semibold">此教師帳號建立時未設定密碼，需完成安全啟用</p>
               </div>
             </div>
 
             <div className="space-y-4 text-xs">
               <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
-                <span className="font-bold text-slate-700 block">專屬一次性安全啟用連結：</span>
-                <div className="flex items-center gap-2 bg-white p-2.5 rounded-xl border border-slate-200">
-                  <span className="font-mono text-[11px] text-slate-600 truncate flex-1">
-                    https://school-care.edu.tw/auth/activate?token=act_{activatingUser.id.replace(/[^a-zA-Z0-9]/g, '')}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      navigator.clipboard?.writeText(
-                        `https://school-care.edu.tw/auth/activate?token=act_${activatingUser.id.replace(/[^a-zA-Z0-9]/g, '')}`
-                      );
-                      setCopiedLink(true);
-                      setTimeout(() => setCopiedLink(false), 2500);
-                    }}
-                    className="p-1.5 text-sky-600 hover:bg-sky-50 rounded-lg transition-colors shrink-0"
-                    title="複製連結"
-                  >
-                    <Copy className="w-4 h-4" />
-                  </button>
-                </div>
+                <span className="font-bold text-slate-700 block">Firebase Auth 密碼設定／重設安全連結：</span>
+                {loadingActivationLink ? (
+                  <p className="text-slate-500">正在向後端請求真實安全啟用連結...</p>
+                ) : realActivationLink ? (
+                  <div className="flex items-center gap-2 bg-white p-2.5 rounded-xl border border-slate-200">
+                    <span className="font-mono text-[11px] text-slate-600 truncate flex-1">
+                      {realActivationLink}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard?.writeText(realActivationLink);
+                        setCopiedLink(true);
+                        setTimeout(() => setCopiedLink(false), 2500);
+                      }}
+                      className="p-1.5 text-sky-600 hover:bg-sky-50 rounded-lg transition-colors shrink-0"
+                      title="複製連結"
+                    >
+                      <Copy className="w-4 h-4" />
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-amber-800 bg-amber-50 p-2.5 rounded-xl border border-amber-200">
+                    {activationLinkError || '尚未產生啟用連結；教師可於登入畫面點擊「忘記密碼」或改用 Google 登入驗證信箱。'}
+                  </p>
+                )}
                 {copiedLink && (
-                  <span className="text-[11px] text-emerald-600 font-bold block animate-in fade-in">
-                    ✓ 專屬安全啟用通知連結已複製到剪貼簿！
+                  <span className="text-[11px] text-emerald-600 font-bold block">
+                    ✓ 安全啟用連結已複製到剪貼簿！
                   </span>
                 )}
-              </div>
-
-              <div className="p-3.5 bg-amber-50/70 border border-amber-200 rounded-2xl text-amber-900 leading-relaxed text-[11px]">
-                📌 依據校園資安安全政策，教師可點擊信件內安全連結自訂專屬密碼完成啟用。管理員亦可在此直接點擊「協助完成安全啟用」快速啟用該教師帳號。
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-2">
@@ -1354,14 +1799,25 @@ export const AdminDashboard: React.FC = () => {
                 </button>
                 <button
                   type="button"
+                  disabled={submitting}
                   onClick={async () => {
-                    await activateTeacherAccount(activatingUser.id);
-                    setActivatingUser(null);
-                    showToast(`已成功為「${activatingUser.name}」完成安全啟用，該帳號已具備登入權限！`);
+                    setSubmitting(true);
+                    try {
+                      const res = await activateTeacherAccount(activatingUser.id);
+                      setActivatingUser(null);
+                      handleMutationOutcome(
+                        res,
+                        `已確認完成「${activatingUser.name}」安全啟用標記！`
+                      );
+                    } catch (err: any) {
+                      showToast(err?.message || '完成啟用失敗', 'error');
+                    } finally {
+                      setSubmitting(false);
+                    }
                   }}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs"
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold shadow-xs"
                 >
-                  <CheckCircle className="w-3.5 h-3.5" /> 立即完成安全啟用
+                  <CheckCircle className="w-3.5 h-3.5" /> 標記完成安全啟用
                 </button>
               </div>
             </div>
@@ -1369,7 +1825,7 @@ export const AdminDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Modal 5: Delete Confirmation Modal */}
+      {/* Modal 5: Delete Confirmation */}
       {deletingUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs animate-in fade-in">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 border border-rose-100 shadow-2xl relative">
@@ -1379,7 +1835,11 @@ export const AdminDashboard: React.FC = () => {
               </span>
               <div>
                 <h3 className="text-base font-extrabold text-slate-800">確認刪除帳號？</h3>
-                <p className="text-xs text-rose-600 font-semibold">此動作將同步自 Firebase 雲端資料庫永久刪除</p>
+                <p className="text-xs text-rose-600 font-semibold">
+                  {deletingUser.authLinked
+                    ? '此動作將同步刪除 Firebase Authentication 與 Firestore 資料'
+                    : '此動作將從 Firestore 永久移除此使用者名冊'}
+                </p>
               </div>
             </div>
 
@@ -1415,10 +1875,11 @@ export const AdminDashboard: React.FC = () => {
               </button>
               <button
                 type="button"
+                disabled={submitting}
                 onClick={handleConfirmDelete}
-                className="px-5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold shadow-xs"
+                className="px-5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-xs font-bold shadow-xs"
               >
-                確定刪除帳號
+                {submitting ? '刪除中...' : '確定刪除帳號'}
               </button>
             </div>
           </div>

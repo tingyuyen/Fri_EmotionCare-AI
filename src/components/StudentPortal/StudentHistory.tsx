@@ -1,10 +1,12 @@
 import React from 'react';
 import { useApp } from '../../context/AppContext';
 import { MOOD_DEFINITIONS } from '../../types';
-import { Calendar, Sparkles, TrendingUp, Heart } from 'lucide-react';
+import { Calendar, Heart } from 'lucide-react';
 
 export const StudentHistory: React.FC = () => {
   const { currentUser, moodLogs } = useApp();
+
+  if (!currentUser) return null;
 
   const userLogs = moodLogs.filter((l) => l.studentId === currentUser.id);
 
