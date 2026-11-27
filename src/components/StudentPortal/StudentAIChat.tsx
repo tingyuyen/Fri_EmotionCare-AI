@@ -256,6 +256,13 @@ export const StudentAIChat: React.FC<StudentAIChatProps> = ({ onOpenBreathing })
                       : 'bg-white text-slate-800 rounded-bl-xs shadow-xs border border-slate-200/80'
                   }`}
                 >
+                  {!isStudent && isSafetyFallback && (
+                    <div className="flex items-center gap-1.5 mb-2 pb-1.5 border-b border-rose-200 text-[11px] font-bold text-rose-800">
+                      <ShieldAlert className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                      <span>系統安全防護提示（非心心 AI 生成回覆）</span>
+                    </div>
+                  )}
+
                   {!isStudent && (situationLabel || detectedMeta) && (
                     <div className="flex flex-wrap items-center gap-1.5 mb-2 pb-1.5 border-b border-slate-100">
                       {situationLabel && (

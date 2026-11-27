@@ -799,7 +799,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Capture history BEFORE appending userMsg so backend does NOT receive duplicate user turn!
     const priorHistory = (chatMessagesMap[studentId] || [])
-      .filter((m) => m.aiStatus !== 'error_notice')
+      .filter((m) => m.aiStatus !== 'error_notice' && m.aiStatus !== 'safety_fallback')
       .slice(-10)
       .map((m) => ({ sender: m.sender, text: m.text }));
 
@@ -839,7 +839,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       if (!response.ok) {
         // Do NOT mask API failure as a real AI response! Save an explicit error/safety notice record.
-        const errMessage = data?.error || 'Gemini AI 服務暫時不可用，請稍後再試。';
+        const baseErr =
+          data?.error ||
+          `AI 伺服器回應異常（HTTP ${response.status}），Gemini AI 服務暫時不可用，請稍後再試。`;
+        const errMessage = data?.errorCode ? `${baseErr}（代碼：${data.errorCode}）` : baseErr;
         setLastChatError(errMessage);
 
         let fallbackNotified = false;

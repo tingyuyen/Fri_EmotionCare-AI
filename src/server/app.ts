@@ -95,18 +95,233 @@ function initFirebaseAdmin() {
 }
 initFirebaseAdmin();
 
-// Initialize Gemini API client on the server side ONLY
-const GEMINI_MODEL = 'gemini-4-hydrogen';
-let ai: GoogleGenAI | null = null;
-if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY') {
-  ai = new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
+// Initialize Gemini API client dynamically on the server side ONLY
+const DEPRECATED_GEMINI_MODELS = new Set([
+  'gemini-1.5-flash',
+  'gemini-1.5-pro',
+  'gemini-pro',
+  'gemini-2.0-flash',
+  'gemini-2.0-pro',
+  'gemini-2.0-flash-thinking',
+]);
+const DEFAULT_GEMINI_MODEL = 'gemini-4-hydrogen';
+const FALLBACK_GEMINI_MODEL = 'gemini-3.1-flash-lite';
+
+function getConfiguredGeminiModel(): string {
+  const requested = (process.env.GEMINI_MODEL || '').trim();
+  if (!requested) return DEFAULT_GEMINI_MODEL;
+  if (DEPRECATED_GEMINI_MODELS.has(requested) || requested === 'gemini-3.8-flash') {
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        scope: 'gemini-config',
+        category: 'model',
+        message: `Configured GEMINI_MODEL "${requested}" is unsupported/deprecated; falling back to "${DEFAULT_GEMINI_MODEL}".`,
+      })
+    );
+    return DEFAULT_GEMINI_MODEL;
+  }
+  return requested;
+}
+
+function getGeminiApiKey(): string | null {
+  const raw = process.env.GEMINI_API_KEY;
+  if (!raw) return null;
+  const cleaned = raw.trim().replace(/^['"]|['"]$/g, '').trim();
+  if (!cleaned || cleaned === 'MY_GEMINI_API_KEY') return null;
+  return cleaned;
+}
+
+let cachedAiKey: string | null = null;
+let cachedAiClient: GoogleGenAI | null = null;
+
+function getGeminiClient(): GoogleGenAI | null {
+  const key = getGeminiApiKey();
+  if (!key) {
+    cachedAiKey = null;
+    cachedAiClient = null;
+    return null;
+  }
+  if (!cachedAiClient || cachedAiKey !== key) {
+    cachedAiKey = key;
+    cachedAiClient = new GoogleGenAI({
+      apiKey: key,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
       },
-    },
-  });
+    });
+  }
+  return cachedAiClient;
+}
+
+type DiagnosticCategory = 'api_key' | 'quota' | 'model' | 'deployment';
+
+interface ClassifiedGeminiError {
+  httpStatus: number;
+  errorCode: string;
+  category: DiagnosticCategory;
+  userMessage: string;
+  rawMessage: string;
+  upstreamStatus: number | null;
+}
+
+function classifyGeminiError(err: any, model: string): ClassifiedGeminiError {
+  const rawMessage = String(err?.message || err || 'Unknown error');
+  const lower = rawMessage.toLowerCase();
+  const upstreamStatus = typeof err?.status === 'number' ? err.status : null;
+  const causeCode = String(err?.cause?.code || err?.code || '');
+
+  if (rawMessage === 'GEMINI_API_KEY_MISSING') {
+    return {
+      httpStatus: 503,
+      errorCode: 'GEMINI_NOT_CONFIGURED',
+      category: 'api_key',
+      userMessage: '後端尚未設定有效的 GEMINI_API_KEY 環境變數，心心 AI 服務暫時不可用。',
+      rawMessage,
+      upstreamStatus,
+    };
+  }
+
+  if (
+    upstreamStatus === 400 &&
+    (lower.includes('api_key_invalid') || lower.includes('api key not valid') || lower.includes('api key expired'))
+  ) {
+    return {
+      httpStatus: 503,
+      errorCode: 'GEMINI_API_KEY_INVALID',
+      category: 'api_key',
+      userMessage: '後端 GEMINI_API_KEY 無效或已過期，請管理員檢查環境變數設定。',
+      rawMessage,
+      upstreamStatus,
+    };
+  }
+
+  if (upstreamStatus === 403 || lower.includes('permission_denied')) {
+    return {
+      httpStatus: 503,
+      errorCode: 'GEMINI_PERMISSION_DENIED',
+      category: 'api_key',
+      userMessage: 'Gemini API 金鑰權限不足或未啟用此服務（403），請檢查金鑰與專案權限。',
+      rawMessage,
+      upstreamStatus,
+    };
+  }
+
+  if (upstreamStatus === 429 || lower.includes('resource_exhausted') || lower.includes('quota')) {
+    return {
+      httpStatus: 429,
+      errorCode: 'UPSTREAM_QUOTA_EXCEEDED',
+      category: 'quota',
+      userMessage: 'Gemini AI 服務目前請求量或額度已達上限（429），請稍候再試。',
+      rawMessage,
+      upstreamStatus,
+    };
+  }
+
+  if (
+    upstreamStatus === 404 ||
+    lower.includes('not_found') ||
+    lower.includes('is not found') ||
+    lower.includes('not supported for generatecontent')
+  ) {
+    return {
+      httpStatus: 503,
+      errorCode: 'GEMINI_MODEL_UNAVAILABLE',
+      category: 'model',
+      userMessage: `目前指定的 AI 模型（${model}）不可用或不支援此請求，請聯絡管理員檢查模型設定。`,
+      rawMessage,
+      upstreamStatus,
+    };
+  }
+
+  if (
+    rawMessage === 'EMPTY_GEMINI_RESPONSE' ||
+    rawMessage === 'INVALID_JSON_GEMINI_RESPONSE' ||
+    rawMessage === 'MISSING_REPLY_IN_GEMINI_RESPONSE'
+  ) {
+    return {
+      httpStatus: 502,
+      errorCode: 'GEMINI_RESPONSE_INVALID',
+      category: 'model',
+      userMessage: 'AI 模型回傳格式異常，本次未能生成有效回覆，請再試一次。',
+      rawMessage,
+      upstreamStatus,
+    };
+  }
+
+  if (
+    lower.includes('fetch failed') ||
+    ['ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'].includes(causeCode)
+  ) {
+    return {
+      httpStatus: 503,
+      errorCode: 'GEMINI_NETWORK_ERROR',
+      category: 'deployment',
+      userMessage: '後端無法連線至 Google Gemini API 端點，請稍後再試或檢查部署網路環境。',
+      rawMessage,
+      upstreamStatus,
+    };
+  }
+
+  return {
+    httpStatus: 503,
+    errorCode: 'GEMINI_UPSTREAM_ERROR',
+    category: 'deployment',
+    userMessage: '心心 AI 服務暫時不可用，本次回覆未由 AI 生成，請稍後再試或聯繫師長。',
+    rawMessage,
+    upstreamStatus,
+  };
+}
+
+let lastGeminiDiagnostic: {
+  timestamp: string;
+  scope: string;
+  category: DiagnosticCategory;
+  errorCode: string;
+  model: string;
+  upstreamStatus: number | null;
+} | null = null;
+
+function logServerDiagnostic(params: {
+  level: 'error' | 'warn';
+  scope: string;
+  category: DiagnosticCategory;
+  errorCode: string;
+  model?: string;
+  upstreamStatus?: number | null;
+  message: string;
+}) {
+  const timestamp = new Date().toISOString();
+  if (params.level === 'error' && params.scope.startsWith('api/gemini')) {
+    lastGeminiDiagnostic = {
+      timestamp,
+      scope: params.scope,
+      category: params.category,
+      errorCode: params.errorCode,
+      model: params.model || getConfiguredGeminiModel(),
+      upstreamStatus: params.upstreamStatus ?? null,
+    };
+  }
+  const payload = {
+    level: params.level,
+    scope: params.scope,
+    category: params.category,
+    errorCode: params.errorCode,
+    model: params.model || getConfiguredGeminiModel(),
+    upstreamStatus: params.upstreamStatus ?? null,
+    runtime: process.env.VERCEL === '1' ? 'vercel' : 'node',
+    hasGeminiKey: Boolean(getGeminiApiKey()),
+    firebaseProjectConfigured: Boolean(fbConfig.projectId),
+    message: params.message.slice(0, 300),
+    timestamp,
+  };
+  if (params.level === 'error') {
+    console.error(JSON.stringify(payload));
+  } else {
+    console.warn(JSON.stringify(payload));
+  }
 }
 
 // JWKS for verifying Firebase Auth ID tokens cryptographically without requiring a service account
@@ -310,8 +525,22 @@ async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction
     req.callerProfile = profile;
     next();
   } catch (err: any) {
-    console.warn('ID Token verification failed:', err?.message || err);
-    res.status(401).json({ error: '登入憑證無效或已過期，請重新登入。', errorCode: 'INVALID_TOKEN' });
+    const msg = String(err?.message || err);
+    const isConfigMissing = msg.includes('Missing Firebase projectId configuration');
+    logServerDiagnostic({
+      level: isConfigMissing ? 'error' : 'warn',
+      scope: 'middleware/requireAuth',
+      category: 'deployment',
+      errorCode: isConfigMissing ? 'FIREBASE_CONFIG_MISSING' : 'INVALID_TOKEN',
+      message: msg,
+    });
+    res.status(isConfigMissing ? 500 : 401).json({
+      error: isConfigMissing
+        ? '後端部署缺少 Firebase 專案設定（firebase-applet-config.json / FIREBASE_PROJECT_ID）。'
+        : '登入憑證無效或已過期，請重新登入。',
+      errorCode: isConfigMissing ? 'FIREBASE_CONFIG_MISSING' : 'INVALID_TOKEN',
+      errorCategory: 'deployment',
+    });
   }
 }
 
@@ -533,10 +762,12 @@ export async function generateXinxinReply(params: {
   history?: Array<{ sender: 'student' | 'ai'; text: string }>;
 }): Promise<{
   output: ParsedGeminiChatOutput;
+  modelUsed: string;
   promptTokens: number;
   outputTokens: number;
 }> {
-  if (!ai) {
+  const aiClient = getGeminiClient();
+  if (!aiClient) {
     throw new Error('GEMINI_API_KEY_MISSING');
   }
 
@@ -570,22 +801,63 @@ export async function generateXinxinReply(params: {
     parts: [{ text: `${moodContext}學生說：「${trimmedMessage}」` }],
   });
 
-  const response = await ai.models.generateContent({
-    model: GEMINI_MODEL,
-    contents,
-    config: {
-      systemInstruction: XINXIN_SYSTEM_INSTRUCTION,
-      responseMimeType: 'application/json',
-      responseSchema: CHAT_RESPONSE_SCHEMA,
-      thinkingConfig: {
-        thinkingLevel: ThinkingLevel.LOW,
-      },
-    },
-  });
+  const primaryModel = getConfiguredGeminiModel();
+  const candidateModels =
+    primaryModel === FALLBACK_GEMINI_MODEL
+      ? [primaryModel]
+      : [primaryModel, FALLBACK_GEMINI_MODEL];
+
+  let response: Awaited<ReturnType<GoogleGenAI['models']['generateContent']>> | null = null;
+  let modelUsed = primaryModel;
+  let lastError: any = null;
+
+  for (const candidate of candidateModels) {
+    modelUsed = candidate;
+    try {
+      response = await aiClient.models.generateContent({
+        model: candidate,
+        contents,
+        config: {
+          systemInstruction: XINXIN_SYSTEM_INSTRUCTION,
+          responseMimeType: 'application/json',
+          responseSchema: CHAT_RESPONSE_SCHEMA,
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.LOW,
+          },
+        },
+      });
+      break;
+    } catch (err: any) {
+      lastError = err;
+      const classified = classifyGeminiError(err, candidate);
+      const canFallback =
+        classified.errorCode === 'GEMINI_MODEL_UNAVAILABLE' &&
+        candidate !== candidateModels[candidateModels.length - 1];
+      if (canFallback) {
+        logServerDiagnostic({
+          level: 'warn',
+          scope: 'api/gemini/chat/fallback',
+          category: 'model',
+          errorCode: classified.errorCode,
+          model: candidate,
+          upstreamStatus: classified.upstreamStatus,
+          message: `Model "${candidate}" unavailable; retrying with "${FALLBACK_GEMINI_MODEL}". Detail: ${classified.rawMessage}`,
+        });
+        continue;
+      }
+      throw Object.assign(err instanceof Error ? err : new Error(String(err)), {
+        _attemptedModel: candidate,
+      });
+    }
+  }
+
+  if (!response) {
+    throw lastError || new Error('GEMINI_UPSTREAM_ERROR');
+  }
 
   const rawText = (response.text ?? '').trim();
   if (!rawText) {
-    throw new Error('EMPTY_GEMINI_RESPONSE');
+    throw Object.assign(new Error('EMPTY_GEMINI_RESPONSE'), { _attemptedModel: modelUsed });
   }
 
   let parsed: Partial<ParsedGeminiChatOutput>;
@@ -636,6 +908,7 @@ export async function generateXinxinReply(params: {
           ? parsed.crisisSummaryForTeacher.slice(0, 800)
           : '',
     },
+    modelUsed,
     promptTokens: usage?.promptTokenCount || 0,
     outputTokens: usage?.candidatesTokenCount || 0,
   };
@@ -667,15 +940,21 @@ export function createApp() {
   const app = express();
   app.use(express.json({ limit: '64kb' }));
 
-  // Health check endpoint
+  // Health check endpoint (non-secret runtime & deployment diagnostics)
   app.get('/api/health', (_req: Request, res: Response) => {
     rolloverMetricsIfNeeded();
     res.json({
       status: 'ok',
       service: 'AI 校園情緒關懷系統 API',
-      model: GEMINI_MODEL,
-      hasGeminiKey: Boolean(ai),
+      runtime: process.env.VERCEL === '1' ? 'vercel' : 'node',
+      model: getConfiguredGeminiModel(),
+      fallbackModel: FALLBACK_GEMINI_MODEL,
+      hasGeminiKey: Boolean(getGeminiApiKey()),
+      firebaseProjectConfigured: Boolean(fbConfig.projectId),
+      firestoreDatabaseConfigured: Boolean(fbConfig.firestoreDatabaseId),
       adminSdkReady,
+      lastGeminiError: lastGeminiDiagnostic,
+      timestamp: new Date().toISOString(),
     });
   });
 
@@ -722,11 +1001,20 @@ export function createApp() {
       return;
     }
 
-    if (!ai) {
+    if (!getGeminiClient()) {
       usageMetrics.failedRequestsToday += 1;
-      res.status(503).json({
-        error: '目前後端尚未設定有效的 Gemini API Key，心心 AI 服務暫時無法使用。',
+      logServerDiagnostic({
+        level: 'error',
+        scope: 'api/gemini/chat',
+        category: 'api_key',
         errorCode: 'GEMINI_NOT_CONFIGURED',
+        message: 'GEMINI_API_KEY environment variable is missing or placeholder.',
+      });
+      res.status(503).json({
+        error: '目前後端尚未設定有效的 GEMINI_API_KEY，心心 AI 服務暫時無法使用。',
+        errorCode: 'GEMINI_NOT_CONFIGURED',
+        errorCategory: 'api_key',
+        model: getConfiguredGeminiModel(),
         serviceUnavailable: true,
         localCrisisMatch: matchesHighRiskKeywords(message),
       });
@@ -735,9 +1023,17 @@ export function createApp() {
 
     const quota = checkAndConsumeQuota(authUser.uid);
     if (!quota.allowed) {
+      logServerDiagnostic({
+        level: 'warn',
+        scope: 'api/gemini/chat',
+        category: 'quota',
+        errorCode: 'RATE_LIMIT_EXCEEDED',
+        message: `Per-user quota reached for uid=${authUser.uid.slice(0, 8)}...`,
+      });
       res.status(429).json({
         error: quota.reason,
         errorCode: 'RATE_LIMIT_EXCEEDED',
+        errorCategory: 'quota',
         remainingDaily: quota.remainingDaily,
       });
       return;
@@ -747,7 +1043,7 @@ export function createApp() {
 
     try {
       const selfReportedMood = VALID_EMOTIONS.has(mood as MoodType) ? (mood as MoodType) : undefined;
-      const { output, promptTokens, outputTokens } = await generateXinxinReply({
+      const { output, modelUsed, promptTokens, outputTokens } = await generateXinxinReply({
         message,
         selfReportedMood,
         history: Array.isArray(history) ? history : [],
@@ -799,7 +1095,7 @@ export function createApp() {
 
       res.json({
         reply: output.reply,
-        model: GEMINI_MODEL,
+        model: modelUsed,
         selfReportedMood: selfReportedMood || null,
         modelDetectedEmotion: output.detectedEmotion,
         situationCategory: output.situationCategory,
@@ -812,15 +1108,24 @@ export function createApp() {
       });
     } catch (err: any) {
       usageMetrics.failedRequestsToday += 1;
-      console.error('Gemini API Chat Error:', err?.message || err);
+      const attemptedModel = String(err?._attemptedModel || getConfiguredGeminiModel());
+      const classified = classifyGeminiError(err, attemptedModel);
 
-      const status = err?.status === 429 ? 429 : 503;
-      res.status(status).json({
-        error:
-          status === 429
-            ? 'Gemini AI 服務目前請求量過高，請稍候一分鐘再試。'
-            : '心心 AI 服務暫時無法連線，本次回覆未由 AI 生成，請稍後再試或聯繫師長。',
-        errorCode: status === 429 ? 'UPSTREAM_QUOTA_EXCEEDED' : 'GEMINI_UNAVAILABLE',
+      logServerDiagnostic({
+        level: 'error',
+        scope: 'api/gemini/chat',
+        category: classified.category,
+        errorCode: classified.errorCode,
+        model: attemptedModel,
+        upstreamStatus: classified.upstreamStatus,
+        message: classified.rawMessage,
+      });
+
+      res.status(classified.httpStatus).json({
+        error: classified.userMessage,
+        errorCode: classified.errorCode,
+        errorCategory: classified.category,
+        model: attemptedModel,
         serviceUnavailable: true,
         localCrisisMatch: matchesHighRiskKeywords(message),
       });
@@ -830,8 +1135,20 @@ export function createApp() {
   // Teacher/Admin AI Care Summary endpoint using genuine Gemini API (not client keyword rules)
   app.post('/api/gemini/summarize-student', requireAuth, requireTeacherOrAdmin, async (req: AuthedRequest, res: Response) => {
     rolloverMetricsIfNeeded();
-    if (!ai) {
-      res.status(503).json({ error: 'Gemini API 尚未設定，無法產生 AI 摘要。' });
+    const aiClient = getGeminiClient();
+    if (!aiClient) {
+      logServerDiagnostic({
+        level: 'error',
+        scope: 'api/gemini/summarize-student',
+        category: 'api_key',
+        errorCode: 'GEMINI_NOT_CONFIGURED',
+        message: 'GEMINI_API_KEY missing when generating student summary.',
+      });
+      res.status(503).json({
+        error: '後端尚未設定 GEMINI_API_KEY，無法產生 AI 摘要。',
+        errorCode: 'GEMINI_NOT_CONFIGURED',
+        errorCategory: 'api_key',
+      });
       return;
     }
 
@@ -846,33 +1163,60 @@ export function createApp() {
       .map((m: any) => `${m.sender === 'student' ? '學生' : '心心AI'}：${String(m.text || '').slice(0, 300)}`)
       .join('\n');
 
+    const primaryModel = getConfiguredGeminiModel();
+    const candidateModels =
+      primaryModel === FALLBACK_GEMINI_MODEL
+        ? [primaryModel]
+        : [primaryModel, FALLBACK_GEMINI_MODEL];
+
+    let attemptedModel = primaryModel;
     try {
-      const response = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: `請閱讀以下國小學生「${String(studentName || '同學').slice(0, 30)}」近期與校園 AI 的對話紀錄，產出給責任導師的客觀關懷摘要（繁體中文，不臆測診斷）：\n\n${transcriptText}`,
-        config: {
-          systemInstruction:
-            '你是校園輔導資料整理助手。請依據實際對話內容客觀歸納情緒傾向、討論主題、是否含安全風險（霸凌、暴力、自傷等），以及給導師的具體日常關懷建議（2~3句）。不可編造對話未提及之事實。',
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              primaryEmotion: {
-                type: Type.STRING,
-                enum: ['happy', 'calm', 'anxious', 'sad', 'angry', 'tired'],
+      let response: Awaited<ReturnType<GoogleGenAI['models']['generateContent']>> | null = null;
+      for (const candidate of candidateModels) {
+        attemptedModel = candidate;
+        try {
+          response = await aiClient.models.generateContent({
+            model: candidate,
+            contents: `請閱讀以下國小學生「${String(studentName || '同學').slice(0, 30)}」近期與校園 AI 的對話紀錄，產出給責任導師的客觀關懷摘要（繁體中文，不臆測診斷）：\n\n${transcriptText}`,
+            config: {
+              systemInstruction:
+                '你是校園輔導資料整理助手。請依據實際對話內容客觀歸納情緒傾向、討論主題、是否含安全風險（霸凌、暴力、自傷等），以及給導師的具體日常關懷建議（2~3句）。不可編造對話未提及之事實。',
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  primaryEmotion: {
+                    type: Type.STRING,
+                    enum: ['happy', 'calm', 'anxious', 'sad', 'angry', 'tired'],
+                  },
+                  topics: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  careKeypoints: { type: Type.STRING },
+                  safetyAlert: { type: Type.BOOLEAN },
+                },
+                required: ['primaryEmotion', 'topics', 'careKeypoints', 'safetyAlert'],
               },
-              topics: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-              },
-              careKeypoints: { type: Type.STRING },
-              safetyAlert: { type: Type.BOOLEAN },
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
             },
-            required: ['primaryEmotion', 'topics', 'careKeypoints', 'safetyAlert'],
-          },
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        },
-      });
+          });
+          break;
+        } catch (modelErr: any) {
+          const classifiedModelErr = classifyGeminiError(modelErr, candidate);
+          if (
+            classifiedModelErr.errorCode === 'GEMINI_MODEL_UNAVAILABLE' &&
+            candidate !== candidateModels[candidateModels.length - 1]
+          ) {
+            continue;
+          }
+          throw modelErr;
+        }
+      }
+
+      if (!response) {
+        throw new Error('EMPTY_GEMINI_RESPONSE');
+      }
 
       const parsed = JSON.parse((response.text ?? '{}').trim());
       const usage = response.usageMetadata;
@@ -887,19 +1231,79 @@ export function createApp() {
         careKeypoints: parsed.careKeypoints || '已完成對話瀏覽。',
         safetyAlert: Boolean(parsed.safetyAlert),
         generatedBy: 'gemini',
+        model: attemptedModel,
       });
     } catch (err: any) {
       usageMetrics.failedRequestsToday += 1;
-      console.error('Summarize student error:', err?.message || err);
-      res.status(503).json({ error: '無法取得 Gemini AI 關懷摘要，請稍後再試。' });
+      const classified = classifyGeminiError(err, attemptedModel);
+      logServerDiagnostic({
+        level: 'error',
+        scope: 'api/gemini/summarize-student',
+        category: classified.category,
+        errorCode: classified.errorCode,
+        model: attemptedModel,
+        upstreamStatus: classified.upstreamStatus,
+        message: classified.rawMessage,
+      });
+      res.status(classified.httpStatus).json({
+        error: classified.userMessage,
+        errorCode: classified.errorCode,
+        errorCategory: classified.category,
+        model: attemptedModel,
+      });
     }
+  });
+
+  // Admin: Live Gemini Model & API Key Diagnostic Check
+  app.get('/api/admin/gemini-check', requireAuth, requireAdmin, async (_req: AuthedRequest, res: Response) => {
+    const aiClient = getGeminiClient();
+    const configuredModel = getConfiguredGeminiModel();
+    if (!aiClient) {
+      res.status(503).json({
+        ok: false,
+        errorCode: 'GEMINI_NOT_CONFIGURED',
+        errorCategory: 'api_key',
+        configuredModel,
+        hasGeminiKey: false,
+      });
+      return;
+    }
+
+    const modelsToCheck = Array.from(
+      new Set([configuredModel, FALLBACK_GEMINI_MODEL, 'gemini-3.8-flash'])
+    );
+    const checks: Record<string, { available: boolean; errorCode?: string; category?: string; detail?: string }> = {};
+
+    for (const modelName of modelsToCheck) {
+      try {
+        await aiClient.models.get({ model: modelName });
+        checks[modelName] = { available: true };
+      } catch (err: any) {
+        const classified = classifyGeminiError(err, modelName);
+        checks[modelName] = {
+          available: false,
+          errorCode: classified.errorCode,
+          category: classified.category,
+          detail: classified.rawMessage.slice(0, 160),
+        };
+      }
+    }
+
+    res.json({
+      ok: Boolean(checks[configuredModel]?.available || checks[FALLBACK_GEMINI_MODEL]?.available),
+      configuredModel,
+      fallbackModel: FALLBACK_GEMINI_MODEL,
+      hasGeminiKey: true,
+      checks,
+      lastGeminiError: lastGeminiDiagnostic,
+    });
   });
 
   // Admin: AI Usage & Cost Monitoring Endpoint
   app.get('/api/admin/usage', requireAuth, requireAdmin, (_req: AuthedRequest, res: Response) => {
     rolloverMetricsIfNeeded();
     res.json({
-      model: GEMINI_MODEL,
+      model: getConfiguredGeminiModel(),
       totalRequestsToday: usageMetrics.totalRequestsToday,
       successfulRequestsToday: usageMetrics.successfulRequestsToday,
       failedRequestsToday: usageMetrics.failedRequestsToday,
@@ -908,8 +1312,9 @@ export function createApp() {
       dailyLimitPerUser: DAILY_LIMIT_PER_USER,
       minuteLimitPerUser: MINUTE_LIMIT_PER_USER,
       adminSdkReady,
-      geminiKeyConfigured: Boolean(ai),
+      geminiKeyConfigured: Boolean(getGeminiApiKey()),
       activeUsersToday: userUsageMap.size,
+      lastGeminiError: lastGeminiDiagnostic,
     });
   });
 

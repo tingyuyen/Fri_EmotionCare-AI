@@ -586,6 +586,8 @@ export const StudentAIChatViewer: React.FC<StudentAIChatViewerProps> = ({ select
                                     ? selectedStudent?.name
                                     : isErrorNotice
                                     ? '系統服務提示（非 AI 回覆）'
+                                    : isSafetyFallback
+                                    ? '系統安全防護提示（非 AI 回覆）'
                                     : '心心 AI'}
                                 </span>
                                 {msg.situationCategory && (
