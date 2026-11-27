@@ -11,7 +11,6 @@ import {
   LogOut,
   AlertTriangle,
   CheckCircle2,
-  FlaskConical,
   KeyRound,
   RefreshCw,
   UserCheck,
@@ -37,7 +36,6 @@ export const AuthGate: React.FC = () => {
     claimInitialAdmin,
     completeFirstLoginSetup,
     signOutUser,
-    enterSandboxMode,
   } = useApp();
 
   const [loginTab, setLoginTab] = useState<'google' | 'email'>('google');
@@ -812,26 +810,6 @@ export const AuthGate: React.FC = () => {
               </form>
             </div>
           )}
-        </div>
-
-        {/* Isolated Preview Sandbox Mode Card */}
-        <div className="bg-white/80 backdrop-blur-xs rounded-2xl p-4 border border-dashed border-slate-300 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="text-left">
-            <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
-              <FlaskConical className="w-4 h-4 text-amber-600" />
-              離線體驗沙盒模式（僅供介面展示）
-            </div>
-            <p className="text-[11px] text-slate-500 mt-0.5">
-              使用精簡預設帳號（學生、老師、管理員各一位）離線體驗畫面，不寫入雲端資料庫。
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => enterSandboxMode('student')}
-            className="shrink-0 px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold border border-slate-200 transition-colors"
-          >
-            開啟沙盒體驗
-          </button>
         </div>
       </div>
     </div>

@@ -10,7 +10,6 @@ import {
   Plus,
   Trash2,
   RefreshCw,
-  Database,
   CheckCircle,
   ShieldCheck,
   Search,
@@ -31,7 +30,6 @@ import {
 
 export const AdminDashboard: React.FC = () => {
   const {
-    appMode,
     currentUser,
     classes,
     users,
@@ -43,14 +41,12 @@ export const AdminDashboard: React.FC = () => {
     generateTeacherActivationLink,
     deleteUser,
     fetchAiUsageSummary,
-    seedSandboxIntoFirestore,
     cleanupLegacyPresetUsers,
-    resetSandboxData,
   } = useApp();
 
-  const [activeTab, setActiveTab] = useState<'users' | 'chat_viewer' | 'classes' | 'ai_monitor' | 'sandbox'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'chat_viewer' | 'classes' | 'ai_monitor'>('users');
   const [adminChatClassFilter, setAdminChatClassFilter] = useState<string>('all');
-  const [userCategory, setUserCategory] = useState<'student' | 'teacher' | 'all'>('student');
+  const [userCategory, setUserCategory] = useState<'all' | 'student' | 'teacher' | 'admin'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedClassFilter, setSelectedClassFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'disabled' | 'needsActivation'>('all');
@@ -147,20 +143,16 @@ export const AdminDashboard: React.FC = () => {
   };
 
   useEffect(() => {
-    if (activeTab === 'ai_monitor' && appMode === 'cloud') {
+    if (activeTab === 'ai_monitor') {
       loadAiUsage();
     }
-  }, [activeTab, appMode]);
+  }, [activeTab]);
 
   // Fetch real activation link when opening Modal 4
   useEffect(() => {
     if (!activatingUser) {
       setRealActivationLink(null);
       setActivationLinkError(null);
-      return;
-    }
-    if (appMode === 'sandbox') {
-      setActivationLinkError('離線沙盒模式不連線 Firebase Auth，僅供預覽啟用狀態切換。');
       return;
     }
     let cancelled = false;
@@ -184,7 +176,7 @@ export const AdminDashboard: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [activatingUser?.id, appMode]);
+  }, [activatingUser?.id]);
 
   const handleMutationOutcome = (result: AdminMutationResult, successMsg: string) => {
     if (result.warning) {
@@ -432,6 +424,7 @@ export const AdminDashboard: React.FC = () => {
   const filteredUsers = users.filter((u) => {
     if (userCategory === 'student' && u.role !== 'student') return false;
     if (userCategory === 'teacher' && u.role !== 'teacher') return false;
+    if (userCategory === 'admin' && u.role !== 'admin') return false;
 
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
@@ -455,6 +448,7 @@ export const AdminDashboard: React.FC = () => {
 
   const studentsCount = users.filter((u) => u.role === 'student').length;
   const teachersCount = users.filter((u) => u.role === 'teacher').length;
+  const adminsCount = users.filter((u) => u.role === 'admin').length;
   const unactivatedTeachersCount = users.filter(
     (u) => u.role === 'teacher' && (u.needsActivation || !u.passwordSet)
   ).length;
@@ -509,7 +503,7 @@ export const AdminDashboard: React.FC = () => {
           </div>
           <div className="flex items-center gap-1 text-[11px] text-slate-400 mt-2">
             <GraduationCap className="w-3.5 h-3.5 text-teal-500" />
-            <span>{appMode === 'cloud' ? '雲端 Firestore 同步中' : '離線沙盒試用資料'}</span>
+            <span>雲端 Firestore 即時同步中</span>
           </div>
         </div>
 
@@ -590,17 +584,6 @@ export const AdminDashboard: React.FC = () => {
         >
           <Activity className="w-4 h-4" /> AI 額度與服務監控
         </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('sandbox')}
-          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all shrink-0 ${
-            activeTab === 'sandbox'
-              ? 'bg-teal-600 text-white shadow-xs shadow-teal-600/20'
-              : 'text-slate-600 hover:text-teal-700 hover:bg-teal-50/60'
-          }`}
-        >
-          <Database className="w-4 h-4" /> 模擬資料與測試管理
-        </button>
       </div>
 
       {/* Tab 1: User Management */}
@@ -661,21 +644,36 @@ export const AdminDashboard: React.FC = () => {
           )}
 
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-2xl text-xs font-bold">
+            <div className="flex flex-wrap items-center gap-1 bg-slate-100 p-1 rounded-2xl text-xs font-bold">
+              <button
+                type="button"
+                onClick={() => {
+                  setUserCategory('all');
+                  setStatusFilter('all');
+                }}
+                className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl transition-all ${
+                  userCategory === 'all'
+                    ? 'bg-white shadow-2xs text-slate-900'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <Users className="w-4 h-4 text-slate-700" />
+                全部登入端 ({users.length})
+              </button>
               <button
                 type="button"
                 onClick={() => {
                   setUserCategory('student');
                   setStatusFilter('all');
                 }}
-                className={`flex items-center gap-1.5 px-4 py-2 rounded-xl transition-all ${
+                className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl transition-all ${
                   userCategory === 'student'
                     ? 'bg-white shadow-2xs text-teal-800'
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
                 <GraduationCap className="w-4 h-4 text-teal-600" />
-                學生帳號名冊 ({studentsCount})
+                學生端 ({studentsCount})
               </button>
               <button
                 type="button"
@@ -683,14 +681,14 @@ export const AdminDashboard: React.FC = () => {
                   setUserCategory('teacher');
                   setStatusFilter('all');
                 }}
-                className={`flex items-center gap-1.5 px-4 py-2 rounded-xl transition-all ${
+                className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl transition-all ${
                   userCategory === 'teacher'
                     ? 'bg-white shadow-2xs text-sky-800'
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
                 <Users className="w-4 h-4 text-sky-600" />
-                教師帳號名冊 ({teachersCount})
+                教師端 ({teachersCount})
                 {unactivatedTeachersCount > 0 && (
                   <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-amber-100 text-amber-800">
                     {unactivatedTeachersCount} 待啟用
@@ -700,17 +698,17 @@ export const AdminDashboard: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
-                  setUserCategory('all');
+                  setUserCategory('admin');
                   setStatusFilter('all');
                 }}
-                className={`flex items-center gap-1.5 px-4 py-2 rounded-xl transition-all ${
-                  userCategory === 'all'
+                className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl transition-all ${
+                  userCategory === 'admin'
                     ? 'bg-white shadow-2xs text-purple-800'
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
                 <ShieldCheck className="w-4 h-4 text-purple-600" />
-                全體名單 ({users.length})
+                管理員端 ({adminsCount})
               </button>
             </div>
 
@@ -1100,24 +1098,18 @@ export const AdminDashboard: React.FC = () => {
                 即時檢視伺服器端速率限制（Rate Limiting）、每日配額與 Firebase Admin SDK 配置狀況。
               </p>
             </div>
-            {appMode === 'cloud' && (
-              <button
-                type="button"
-                onClick={loadAiUsage}
-                disabled={loadingUsage}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-teal-50 hover:bg-teal-100 text-teal-800 text-xs font-bold border border-teal-200 transition-colors"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${loadingUsage ? 'animate-spin' : ''}`} />
-                重新整理監控數據
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={loadAiUsage}
+              disabled={loadingUsage}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-teal-50 hover:bg-teal-100 text-teal-800 text-xs font-bold border border-teal-200 transition-colors"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingUsage ? 'animate-spin' : ''}`} />
+              重新整理監控數據
+            </button>
           </div>
 
-          {appMode !== 'cloud' ? (
-            <div className="p-6 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
-              目前為離線沙盒試用模式。請登入正式雲端管理員帳號以查詢後端即時請求與 Token 使用量。
-            </div>
-          ) : !aiUsage ? (
+          {!aiUsage ? (
             <div className="p-6 rounded-2xl bg-slate-50 border border-slate-200 text-xs text-slate-500 text-center">
               {loadingUsage ? '正在載入後端監控資料...' : '無法取得監控數據，請確認管理員憑證有效。'}
             </div>
@@ -1196,91 +1188,6 @@ export const AdminDashboard: React.FC = () => {
               </div>
             </div>
           )}
-        </div>
-      )}
-
-      {/* Tab 4: Mock Data Sandbox & Testing */}
-      {activeTab === 'sandbox' && (
-        <div className="bg-white rounded-3xl p-6 sm:p-8 border border-teal-100 shadow-2xs space-y-6">
-          <div>
-            <h3 className="text-lg font-extrabold text-slate-800 flex items-center gap-2">
-              <Database className="w-5 h-5 text-teal-600" /> 模擬測試資料管理與隱私聲明
-            </h3>
-            <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-              正式雲端模式與沙盒離線試用模式完全隔離。以下工具僅匯入合成模擬班級與測試學生，絕不覆蓋已註冊之真實管理員或使用者帳號。
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="p-5 rounded-2xl bg-teal-50/70 border border-teal-200">
-              <h4 className="font-bold text-teal-900 text-sm mb-2">
-                {appMode === 'cloud' ? '📥 匯入合成範例班級與學生至 Firestore' : '🔄 重置離線沙盒測試數據'}
-              </h4>
-              <p className="text-xs text-teal-800 mb-4 leading-relaxed">
-                {appMode === 'cloud'
-                  ? '以 merge 模式寫入示範班級（三年二班、五年一班）、模擬學生名單與心情範例至雲端資料庫，不會刪除或覆蓋現有真實帳號。'
-                  : '將目前離線沙盒記憶體中的班級、簽到、對話與關懷筆記還原為最初示範狀態。'}
-              </p>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={async () => {
-                    if (appMode === 'cloud') {
-                      setSubmitting(true);
-                      try {
-                        await seedSandboxIntoFirestore();
-                        showToast('已成功將精簡示範班級與學生／教師資料寫入 Firestore（未覆蓋真實帳號）！');
-                      } catch (err: any) {
-                        showToast(err?.message || '匯入範例資料失敗', 'error');
-                      } finally {
-                        setSubmitting(false);
-                      }
-                    } else {
-                      resetSandboxData();
-                      showToast('已還原離線沙盒測試資料！');
-                    }
-                  }}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-xs transition-colors"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  {appMode === 'cloud' ? '匯入精簡範例資料（1師1生）' : '立即重置沙盒資料'}
-                </button>
-
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={async () => {
-                    setSubmitting(true);
-                    try {
-                      const res = await cleanupLegacyPresetUsers();
-                      showToast(`已清除舊版多餘預設帳號（使用者 ${res.deletedUsers} 筆、班級 ${res.deletedClasses} 筆）！`);
-                    } catch (err: any) {
-                      showToast(err?.message || '清除舊版預設資料失敗', 'error');
-                    } finally {
-                      setSubmitting(false);
-                    }
-                  }}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-xs transition-colors"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  清除舊版多餘預設帳號
-                </button>
-              </div>
-            </div>
-
-            <div className="p-5 rounded-2xl bg-sky-50/70 border border-sky-200">
-              <h4 className="font-bold text-sky-900 text-sm mb-2">
-                🛡️ 學生個資保護機制與安全邊界
-              </h4>
-              <p className="text-xs text-sky-800 mb-2 leading-relaxed">
-                • 只有管理員端能刪除或修改現有學生端與教師端的使用者資料（前後端與 Firestore Rules 同步鎖定）。
-              </p>
-              <p className="text-xs text-sky-800 leading-relaxed">
-                • 教師端與管理員端皆可依法授權查閱學生與 AI 的談話內容，每次查閱均寫入 <code>chat_access_logs</code> 稽核日誌。
-              </p>
-            </div>
-          </div>
         </div>
       )}
 

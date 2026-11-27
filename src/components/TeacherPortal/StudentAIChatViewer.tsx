@@ -38,7 +38,6 @@ export const StudentAIChatViewer: React.FC<StudentAIChatViewerProps> = ({ select
   const {
     currentUser,
     firebaseUser,
-    appMode,
     users,
     classes,
     getStudentChatMessages,
@@ -144,8 +143,8 @@ export const StudentAIChatViewer: React.FC<StudentAIChatViewerProps> = ({ select
   const handleGenerateGeminiSummary = async () => {
     if (!selectedStudent || !accessResult.allowed || accessResult.messages.length === 0) return;
 
-    if (appMode === 'sandbox' || !firebaseUser) {
-      setSummaryError('沙盒離線試用模式未經 Firebase Auth 驗證，無法呼叫受保護的伺服器端 Gemini 摘要 API。請登入正式雲端帳號後使用。');
+    if (!firebaseUser) {
+      setSummaryError('請先登入 Firebase 帳號後再呼叫受保護的伺服器端 Gemini 摘要 API。');
       return;
     }
 
@@ -331,7 +330,7 @@ export const StudentAIChatViewer: React.FC<StudentAIChatViewerProps> = ({ select
             </div>
           </div>
 
-          {/* Least-privilege Isolation Info / Sandbox Cross-Class Test */}
+          {/* Least-privilege Isolation Info */}
           <div className="bg-slate-50 rounded-3xl p-4 border border-dashed border-slate-300">
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-600 mb-2">
               <ShieldAlert className="w-4 h-4 text-rose-500" />
@@ -341,10 +340,10 @@ export const StudentAIChatViewer: React.FC<StudentAIChatViewerProps> = ({ select
               <p className="text-[11px] text-slate-600 leading-relaxed">
                 您目前以<strong>管理員身分</strong>檢視學生與 AI 的對話紀錄，具全校班級查閱權限；一般教師端仍嚴格受限於所負責之班級。
               </p>
-            ) : appMode === 'cloud' && currentUser.role === 'teacher' ? (
+            ) : (
               <div className="text-[11px] text-slate-600 leading-relaxed space-y-1.5">
                 <p>
-                  正式雲端模式已啟用最小權限查詢（<code>where(&apos;classId&apos;, &apos;==&apos;, classId)</code>），非本班學生資料不會載入至前端記憶體。
+                  系統已啟用最小權限查詢（<code>where(&apos;classId&apos;, &apos;==&apos;, classId)</code>），非本班學生資料不會載入至前端記憶體。
                 </p>
                 <button
                   type="button"
@@ -354,34 +353,6 @@ export const StudentAIChatViewer: React.FC<StudentAIChatViewerProps> = ({ select
                   驗證越權 ID 讀取阻擋
                 </button>
               </div>
-            ) : (
-              <>
-                <p className="text-[11px] text-slate-500 leading-relaxed mb-3">
-                  點擊非本班學生，驗證系統跨班存取阻擋機制：
-                </p>
-                <div className="space-y-1.5">
-                  {allStudents
-                    .filter((s) => s.classId !== selectedClassId)
-                    .slice(0, 2)
-                    .map((foreignStudent) => (
-                      <button
-                        type="button"
-                        key={foreignStudent.id}
-                        onClick={() => setSelectedStudentId(foreignStudent.id)}
-                        className="w-full flex items-center justify-between p-2.5 rounded-xl bg-white border border-rose-200 text-rose-800 hover:bg-rose-50 text-xs font-medium transition-colors"
-                      >
-                        <div className="flex items-center gap-2">
-                          <span>{foreignStudent.avatar}</span>
-                          <span>{foreignStudent.name}</span>
-                          <span className="text-[10px] text-slate-400">({foreignStudent.className})</span>
-                        </div>
-                        <span className="text-[10px] bg-rose-100 text-rose-700 px-2 py-0.5 rounded-md font-bold">
-                          測試跨班讀取
-                        </span>
-                      </button>
-                    ))}
-                </div>
-              </>
             )}
           </div>
         </div>

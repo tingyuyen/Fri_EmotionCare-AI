@@ -241,7 +241,7 @@ service cloud.firestore {
       // Only admins may modify or delete existing student/teacher user records
       allow update: if isAdmin() && isValidId(userId) && isValidUser(incoming());
 
-      allow delete: if isAdmin() && isValidId(userId);
+      allow delete: if isAdmin() && isValidId(userId) && userId != request.auth.uid;
     }
 
     // 2. Classes Collection

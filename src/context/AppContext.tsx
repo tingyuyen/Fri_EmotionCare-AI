@@ -12,11 +12,6 @@ import {
   AiUsageSummary,
 } from '../types';
 import {
-  INITIAL_CLASSES,
-  INITIAL_USERS,
-  INITIAL_MOOD_LOGS,
-  INITIAL_CARE_NOTES,
-  INITIAL_CHAT_MESSAGES,
   LEGACY_PRESET_USER_IDS,
   LEGACY_PRESET_CLASS_IDS,
   LEGACY_PRESET_MOOD_LOG_IDS,
@@ -59,7 +54,6 @@ import {
   stripUndefined,
 } from '../utils/date';
 
-export type AppMode = 'cloud' | 'sandbox';
 export type SyncStatus = 'idle' | 'syncing' | 'synced' | 'error';
 
 export interface AdminMutationResult {
@@ -79,16 +73,12 @@ interface BootstrapStatus {
 }
 
 interface AppContextType {
-  appMode: AppMode;
-  enterSandboxMode: (role?: UserRole) => void;
-  exitSandboxMode: () => void;
   authLoading: boolean;
   profileLoading: boolean;
   syncStatus: SyncStatus;
   lastSyncError: string | null;
   clearSyncError: () => void;
   currentUser: User | null;
-  setSandboxUser: (user: User) => void;
   firebaseUser: FirebaseUser | null;
   bootstrapStatus: BootstrapStatus | null;
   accountBlockedReason: string | null;
@@ -141,9 +131,7 @@ interface AppContextType {
   generateTeacherActivationLink: (userId: string, email: string) => Promise<{ ok: boolean; activationLink?: string; error?: string }>;
   deleteUser: (userId: string, firestoreOnlyFallback?: boolean) => Promise<AdminMutationResult>;
   fetchAiUsageSummary: () => Promise<AiUsageSummary | null>;
-  seedSandboxIntoFirestore: () => Promise<void>;
   cleanupLegacyPresetUsers: () => Promise<{ deletedUsers: number; deletedClasses: number }>;
-  resetSandboxData: () => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -151,7 +139,6 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const todayDate = getTaiwanDateString();
 
-  const [appMode, setAppMode] = useState<AppMode>('cloud');
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [authLoading, setAuthLoading] = useState<boolean>(true);
   const [profileLoading, setProfileLoading] = useState<boolean>(false);
@@ -189,42 +176,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setLastChatError(null);
   }, []);
 
-  const enterSandboxMode = (role: UserRole = 'student') => {
-    setAppMode('sandbox');
-    setUsers(INITIAL_USERS);
-    setClasses(INITIAL_CLASSES);
-    setMoodLogs(INITIAL_MOOD_LOGS);
-    setCareNotes(INITIAL_CARE_NOTES);
-    setChatMessagesMap(INITIAL_CHAT_MESSAGES);
-    setCrisisAlerts([]);
-    setChatAccessLogs([]);
-    setAccountBlockedReason(null);
-    const chosen = INITIAL_USERS.find((u) => u.role === role) || INITIAL_USERS[0];
-    setCurrentUser(chosen);
-  };
-
-  const exitSandboxMode = () => {
-    setAppMode('cloud');
-    clearPrivateState();
-  };
-
-  const setSandboxUser = (user: User) => {
-    if (appMode !== 'sandbox') return;
-    setCurrentUser(user);
-  };
-
-  const resetSandboxData = () => {
-    if (appMode !== 'sandbox') return;
-    setUsers(INITIAL_USERS);
-    setClasses(INITIAL_CLASSES);
-    setMoodLogs(INITIAL_MOOD_LOGS);
-    setCareNotes(INITIAL_CARE_NOTES);
-    setChatMessagesMap(INITIAL_CHAT_MESSAGES);
-    setCrisisAlerts([]);
-    setChatAccessLogs([]);
-    setCurrentUser(INITIAL_USERS.find((u) => u.role === 'student') || INITIAL_USERS[0]);
-  };
-
   const refreshBootstrapStatus = useCallback(async (fbUser: FirebaseUser): Promise<BootstrapStatus | null> => {
     try {
       const idToken = await fbUser.getIdToken();
@@ -240,10 +191,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, []);
 
-  // 1. Listen to Firebase Auth state (Cloud Mode)
+  // 1. Listen to Firebase Auth state
   useEffect(() => {
-    if (appMode !== 'cloud') return;
-
     const unsubAuth = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
 
@@ -318,11 +267,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     return () => unsubAuth();
-  }, [appMode, clearPrivateState, refreshBootstrapStatus]);
+  }, [clearPrivateState, refreshBootstrapStatus]);
 
   // 2. Real-time Firestore Listeners (ONLY after auth + active profile are ready; least-privilege scoped queries!)
   useEffect(() => {
-    if (appMode !== 'cloud') return;
     if (!firebaseUser || !currentUser) return;
     if (currentUser.status === 'disabled') return;
     if (currentUser.role === 'teacher' && currentUser.needsActivation) return;
@@ -515,23 +463,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => {
       unsubs.forEach((u) => u());
     };
-  }, [appMode, firebaseUser, currentUser?.id, currentUser?.role, currentUser?.classId, currentUser?.status, currentUser?.needsActivation]);
+  }, [firebaseUser, currentUser?.id, currentUser?.role, currentUser?.classId, currentUser?.status, currentUser?.needsActivation]);
 
   // Auth Methods
   const signInWithGoogle = async () => {
-    setAppMode('cloud');
     setLastSyncError(null);
     await signInWithPopup(auth, googleProvider);
   };
 
   const signInWithEmail = async (email: string, password: string) => {
-    setAppMode('cloud');
     setLastSyncError(null);
     await signInWithEmailAndPassword(auth, email.trim(), password);
   };
 
   const signUpWithEmail = async (email: string, password: string) => {
-    setAppMode('cloud');
     setLastSyncError(null);
     const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
     try {
@@ -662,7 +607,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         await firebaseSignOut(auth);
       }
     } finally {
-      setAppMode('cloud');
       clearPrivateState();
     }
   };
@@ -698,11 +642,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAtMs: existingToday?.createdAtMs || nowMs,
     };
 
-    if (appMode === 'sandbox') {
-      setMoodLogs((prev) => [newLog, ...prev.filter((l) => l.id !== logId && !(l.studentId === currentUser.id && l.date === todayDate))]);
-      return newLog;
-    }
-
     if (!firebaseUser) throw new Error('尚未登入 Firebase，無法儲存心情簽到');
     if (!currentUser.classId) throw new Error('帳號尚未指派班級，請聯繫導師或管理員設定班級');
 
@@ -729,12 +668,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     actionTaken?: string
   ) => {
     if (!currentUser) throw new Error('請先登入');
+    if (!firebaseUser) throw new Error('尚未登入 Firebase');
     const student = users.find((u) => u.id === studentId);
     const nowMs = Date.now();
     const timeStr = getTaiwanTimeString();
 
-    const noteRef = appMode === 'cloud' ? doc(collection(db, 'care_notes')) : null;
-    const noteId = noteRef ? noteRef.id : `care-${nowMs}`;
+    const noteRef = doc(collection(db, 'care_notes'));
+    const noteId = noteRef.id;
 
     const newNote: CareNote = {
       id: noteId,
@@ -749,13 +689,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: `${todayDate} ${timeStr}`,
       createdAtMs: nowMs,
     };
-
-    if (appMode === 'sandbox') {
-      setCareNotes((prev) => [newNote, ...prev]);
-      return;
-    }
-
-    if (!firebaseUser || !noteRef) throw new Error('尚未登入 Firebase');
 
     setSyncStatus('syncing');
     setLastSyncError(null);
@@ -772,13 +705,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Log teacher access to student AI transcript
   const logChatAccess = async (studentId: string, studentName: string, purpose: string = '例行情緒輔導關懷') => {
-    if (!currentUser) return;
+    if (!currentUser || !firebaseUser) return;
     const student = users.find((u) => u.id === studentId);
     const nowMs = Date.now();
     const nowStr = getTaiwanDateTimeString();
 
-    const logRef = appMode === 'cloud' ? doc(collection(db, 'chat_access_logs')) : null;
-    const logId = logRef ? logRef.id : `access-${nowMs}`;
+    const logRef = doc(collection(db, 'chat_access_logs'));
+    const logId = logRef.id;
 
     const newLog: ChatAccessLog = {
       id: logId,
@@ -791,13 +724,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAtMs: nowMs,
       purpose: purpose.slice(0, 300),
     };
-
-    if (appMode === 'sandbox') {
-      setChatAccessLogs((prev) => [newLog, ...prev]);
-      return;
-    }
-
-    if (!firebaseUser || !logRef) return;
 
     try {
       await setDoc(logRef, stripUndefined(newLog));
@@ -822,11 +748,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       resolutionNote: resolutionNote?.trim() ? resolutionNote.trim().slice(0, 1000) : undefined,
     });
 
-    if (appMode === 'sandbox') {
-      setCrisisAlerts((prev) => prev.map((a) => (a.id === alertId ? { ...a, ...updates } : a)));
-      return;
-    }
-
     setSyncStatus('syncing');
     try {
       await updateDoc(doc(db, 'crisis_alerts', alertId), updates);
@@ -849,9 +770,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const isoTime = getTaiwanDateTimeString();
     const todayLog = moodLogs.find((l) => l.studentId === studentId && l.date === todayDate);
 
+    if (!firebaseUser) {
+      setLastChatError('請先登入 Firebase 帳號後再傳送訊息。');
+      return;
+    }
+
+    if (!currentUser.classId) {
+      setLastChatError('您的帳號尚未設定所屬班級，請先完成班級設定或聯繫管理員。');
+      return;
+    }
+
     // 1. Create and persist student message FIRST (Firestore auto-ID)
-    const msgRef = appMode === 'cloud' ? doc(collection(db, 'chat_messages')) : null;
-    const msgId = msgRef ? msgRef.id : `chat-${nowMs}`;
+    const msgRef = doc(collection(db, 'chat_messages'));
+    const msgId = msgRef.id;
 
     const userMsg: ChatMessage = {
       id: msgId,
@@ -871,25 +802,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       .filter((m) => m.aiStatus !== 'error_notice')
       .slice(-10)
       .map((m) => ({ sender: m.sender, text: m.text }));
-
-    if (appMode === 'sandbox') {
-      setChatMessagesMap((prev) => ({
-        ...prev,
-        [studentId]: [...(prev[studentId] || []), userMsg],
-      }));
-      setLastChatError('目前處於「離線體驗沙盒模式」。為保護 AI API 額度與校園帳號安全，即時 Gemini 對話需登入 Google 校園帳號後使用。');
-      return;
-    }
-
-    if (!firebaseUser || !msgRef) {
-      setLastChatError('請先登入 Firebase 帳號後再傳送訊息。');
-      return;
-    }
-
-    if (!currentUser.classId) {
-      setLastChatError('您的帳號尚未設定所屬班級，請先完成班級設定或聯繫管理員。');
-      return;
-    }
 
     setSyncStatus('syncing');
     try {
@@ -1066,19 +978,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Add Class (Awaits Firestore confirmation)
   const addClass = async (cls: Omit<SchoolClass, 'id'>) => {
-    const classRef = appMode === 'cloud' ? doc(collection(db, 'classes')) : null;
-    const classId = classRef ? classRef.id : `class-${Date.now()}`;
+    if (!firebaseUser || currentUser?.role !== 'admin') throw new Error('請先以管理員身分登入');
+    const classRef = doc(collection(db, 'classes'));
+    const classId = classRef.id;
     const newClass: SchoolClass = {
       ...cls,
       id: classId,
     };
 
-    if (appMode === 'sandbox') {
-      setClasses((prev) => [...prev, newClass]);
-      return;
-    }
-
-    if (!firebaseUser || !classRef) throw new Error('請先以管理員身分登入');
     setSyncStatus('syncing');
     try {
       await setDoc(classRef, stripUndefined({ ...newClass, createdAt: getTaiwanDateTimeString() }));
@@ -1093,25 +1000,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const addUser = async (
     userData: Omit<User, 'id'> & { password?: string; firestoreOnlyFallback?: boolean }
   ): Promise<AdminMutationResult> => {
-    if (appMode === 'sandbox') {
-      const uid = `${userData.role}-${Date.now()}`;
-      const isTeacher = userData.role === 'teacher';
-      const hasPassword = Boolean(userData.password && userData.password.trim().length > 0);
-      const newUser: User = {
-        ...userData,
-        id: uid,
-        status: userData.status || 'active',
-        passwordSet: isTeacher ? hasPassword : true,
-        needsActivation: isTeacher ? !hasPassword : false,
-        authLinked: false,
-        createdAt: getTaiwanDateTimeString(),
-        updatedAt: getTaiwanDateTimeString(),
-      };
-      setUsers((prev) => [...prev, newUser]);
-      return { ok: true, authSynced: false, firestoreSynced: true, warning: '離線沙盒模式：僅更新本機測試名單。' };
-    }
-
-    if (!firebaseUser) throw new Error('請先登入管理員帳號');
+    if (!firebaseUser || currentUser?.role !== 'admin') throw new Error('請先登入管理員帳號');
     setSyncStatus('syncing');
 
     const idToken = await firebaseUser.getIdToken();
@@ -1200,14 +1089,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...profileUpdates,
       updatedAt: nowStr,
     });
-
-    if (appMode === 'sandbox') {
-      setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, ...cleanUpdates } : u)));
-      if (currentUser?.id === userId) {
-        setCurrentUser((prev) => (prev ? { ...prev, ...cleanUpdates } : prev));
-      }
-      return { ok: true, authSynced: false, firestoreSynced: true };
-    }
 
     if (!firebaseUser) throw new Error('請先登入管理員帳號');
     setSyncStatus('syncing');
@@ -1298,14 +1179,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (currentUser?.role !== 'admin') {
       throw new Error('權限不足：僅限管理員可刪除現有學生端或教師端帳號。');
     }
-    if (appMode === 'sandbox') {
-      setUsers((prev) => prev.filter((u) => u.id !== userId));
-      return { ok: true, authSynced: false, firestoreSynced: true };
-    }
-
     if (!firebaseUser) throw new Error('請先登入管理員帳號');
+    if (userId === firebaseUser.uid) {
+      throw new Error('不可刪除目前正在登入的管理員帳號。');
+    }
     setSyncStatus('syncing');
 
+    const targetUser = users.find((u) => u.id === userId);
     let authSynced = false;
     let warning: string | undefined;
 
@@ -1320,7 +1200,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         authSynced = true;
       } else if (body?.errorCode === 'ADMIN_SDK_UNCONFIGURED') {
         authSynced = false;
-        warning = '已刪除 Firestore 文件；因未設定 Admin SDK 憑證，Auth 帳號請至 Firebase Console 手動移除。';
+        warning = '已刪除 Firestore 使用者資料；因後端未設定 Admin SDK 憑證，若需同步移除 Auth 登入紀錄請設定 FIREBASE_SERVICE_ACCOUNT_JSON。';
       } else {
         setSyncStatus('error');
         throw new Error(body?.error || '刪除帳號失敗');
@@ -1329,6 +1209,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     try {
       await deleteDoc(doc(db, 'users', userId));
+      if (targetUser?.role === 'admin') {
+        await deleteDoc(doc(db, 'admins', userId)).catch(() => {});
+      }
       setSyncStatus('synced');
       return { ok: true, authSynced, firestoreSynced: true, warning };
     } catch (err) {
@@ -1352,62 +1235,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Explicit Admin-only action to populate sample classes/mock cohort (1 teacher + 1 student) WITHOUT touching real users
-  const seedSandboxIntoFirestore = async () => {
-    if (!firebaseUser || currentUser?.role !== 'admin') {
-      throw new Error('僅限正式管理員可執行範例資料匯入');
-    }
-    setSyncStatus('syncing');
-    try {
-      const batch = writeBatch(db);
-      for (const c of INITIAL_CLASSES) {
-        batch.set(doc(db, 'classes', c.id), stripUndefined(c), { merge: true });
-      }
-      for (const u of INITIAL_USERS.filter((x) => x.role !== 'admin')) {
-        batch.set(
-          doc(db, 'users', u.id),
-          stripUndefined({ ...u, authLinked: false, status: u.status || 'active' }),
-          { merge: true }
-        );
-      }
-      for (const m of INITIAL_MOOD_LOGS) {
-        batch.set(doc(db, 'mood_logs', m.id), stripUndefined(m), { merge: true });
-      }
-      for (const cn of INITIAL_CARE_NOTES) {
-        batch.set(doc(db, 'care_notes', cn.id), stripUndefined(cn), { merge: true });
-      }
-      for (const msgs of Object.values(INITIAL_CHAT_MESSAGES)) {
-        for (const msg of msgs) {
-          batch.set(doc(db, 'chat_messages', msg.id), stripUndefined(msg), { merge: true });
-        }
-      }
-      await batch.commit();
-      setSyncStatus('synced');
-    } catch (err) {
-      setSyncStatus('error');
-      handleFirestoreError(err, OperationType.WRITE, 'batch_seed');
-    }
-  };
-
   // Explicit Admin-only cleanup to delete previously seeded legacy preset users/classes
   const cleanupLegacyPresetUsers = async (): Promise<{ deletedUsers: number; deletedClasses: number }> => {
     if (currentUser?.role !== 'admin') {
       throw new Error('僅限管理員可清理預設測試資料');
     }
-
-    if (appMode === 'sandbox') {
-      const beforeUsers = users.length;
-      const beforeClasses = classes.length;
-      setUsers((prev) => prev.filter((u) => !LEGACY_PRESET_USER_IDS.includes(u.id)));
-      setClasses((prev) => prev.filter((c) => !LEGACY_PRESET_CLASS_IDS.includes(c.id)));
-      setMoodLogs((prev) => prev.filter((m) => !LEGACY_PRESET_MOOD_LOG_IDS.includes(m.id)));
-      setCareNotes((prev) => prev.filter((cn) => !LEGACY_PRESET_CARE_NOTE_IDS.includes(cn.id)));
-      return {
-        deletedUsers: beforeUsers - users.filter((u) => !LEGACY_PRESET_USER_IDS.includes(u.id)).length,
-        deletedClasses: beforeClasses - classes.filter((c) => !LEGACY_PRESET_CLASS_IDS.includes(c.id)).length,
-      };
-    }
-
     if (!firebaseUser) throw new Error('請先登入管理員帳號');
     setSyncStatus('syncing');
     try {
@@ -1430,7 +1262,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         batch.delete(doc(db, 'care_notes', cn.id));
       }
 
-      // Also attempt direct cleanup by known legacy IDs in case not currently in filtered lists
       for (const uid of LEGACY_PRESET_USER_IDS) {
         batch.delete(doc(db, 'users', uid));
       }
@@ -1483,16 +1314,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   return (
     <AppContext.Provider
       value={{
-        appMode,
-        enterSandboxMode,
-        exitSandboxMode,
         authLoading,
         profileLoading,
         syncStatus,
         lastSyncError,
         clearSyncError: () => setLastSyncError(null),
         currentUser,
-        setSandboxUser,
         firebaseUser,
         bootstrapStatus,
         accountBlockedReason,
@@ -1530,9 +1357,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         generateTeacherActivationLink,
         deleteUser,
         fetchAiUsageSummary,
-        seedSandboxIntoFirestore,
         cleanupLegacyPresetUsers,
-        resetSandboxData,
       }}
     >
       {children}

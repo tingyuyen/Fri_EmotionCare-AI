@@ -21,7 +21,7 @@ export const FirebaseGuideModal: React.FC<FirebaseGuideModalProps> = ({ isOpen, 
   };
 
   const firestoreCollections = [
-    { name: 'users', desc: '校園使用者 (學生、教師、管理員) 帳號與角色檔案', rbac: '本人僅可讀改姓名/頭像，導師僅可讀負責班級學生，管理員管理' },
+    { name: 'users', desc: '校園使用者 (學生、教師、管理員) 帳號與角色檔案', rbac: '僅限管理員可修改或刪除現有使用者帳號，本人僅可讀取自身資料，導師僅可讀負責班級學生' },
     { name: 'admins', desc: '系統管理員授權目錄 (含首次啟動認領鎖定)', rbac: '僅限已驗證管理員讀寫或原子化首次認領' },
     { name: 'classes', desc: '班級名冊與責任導師資料', rbac: '已登入且帳號啟用者可讀，管理員可維護' },
     { name: 'mood_logs', desc: '學生每日心情簽到（以 uid_date 為唯一文件鍵）', rbac: '學生本人可讀寫，責任導師僅可讀負責班級，管理員可讀' },

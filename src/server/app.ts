@@ -7,13 +7,14 @@ import { getFirestore } from 'firebase-admin/firestore';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
-import { getTaiwanDateString, getTaiwanDateTimeString } from '../utils/date';
+import { fileURLToPath } from 'url';
+import { getTaiwanDateString, getTaiwanDateTimeString } from '../utils/date.js';
 import type {
   ChatSituationCategory,
   MoodType,
   RiskLevel,
   UserRole,
-} from '../types';
+} from '../types/index.js';
 
 dotenv.config();
 
@@ -23,20 +24,36 @@ interface FirebaseClientConfig {
 }
 
 function loadFirebaseConfig(): FirebaseClientConfig {
-  try {
-    const raw = fs.readFileSync(path.resolve(process.cwd(), 'firebase-applet-config.json'), 'utf-8');
-    const parsed = JSON.parse(raw);
-    return {
-      projectId: parsed.projectId || '',
-      firestoreDatabaseId: parsed.firestoreDatabaseId || '(default)',
-    };
-  } catch (err) {
-    console.warn('Could not load firebase-applet-config.json:', err);
-    return {
-      projectId: process.env.FIREBASE_PROJECT_ID || '',
-      firestoreDatabaseId: process.env.FIRESTORE_DATABASE_ID || '(default)',
-    };
+  const currentDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(process.cwd(), 'firebase-applet-config.json'),
+    path.resolve(currentDir, 'firebase-applet-config.json'),
+    path.resolve(currentDir, '..', 'firebase-applet-config.json'),
+    path.resolve(currentDir, '..', '..', 'firebase-applet-config.json'),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        const raw = fs.readFileSync(candidate, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed?.projectId) {
+          return {
+            projectId: parsed.projectId,
+            firestoreDatabaseId: parsed.firestoreDatabaseId || '(default)',
+          };
+        }
+      }
+    } catch {
+      // try next path
+    }
   }
+
+  console.warn('Could not load firebase-applet-config.json from filesystem; falling back to env vars.');
+  return {
+    projectId: process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || '',
+    firestoreDatabaseId: process.env.FIRESTORE_DATABASE_ID || '(default)',
+  };
 }
 
 const fbConfig = loadFirebaseConfig();

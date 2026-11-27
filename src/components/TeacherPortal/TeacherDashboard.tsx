@@ -32,12 +32,11 @@ export const TeacherDashboard: React.FC = () => {
     acknowledgeCrisisAlert,
     todayDate,
     currentUser,
-    appMode,
   } = useApp();
 
   const [teacherTab, setTeacherTab] = useState<'overview' | 'chat_viewer'>('overview');
 
-  const isTeacherLocked = appMode === 'cloud' && currentUser?.role === 'teacher';
+  const isTeacherLocked = currentUser?.role === 'teacher';
   const [selectedClassId, setSelectedClassId] = useState<string>(
     currentUser?.classId || classes[0]?.id || ''
   );
