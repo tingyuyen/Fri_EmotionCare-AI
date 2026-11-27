@@ -1,10 +1,11 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import {
   User,
   SchoolClass,
   MoodLog,
   CareNote,
   ChatMessage,
+  ChatSession,
   MoodType,
   UserRole,
   ChatAccessLog,
@@ -99,6 +100,9 @@ interface AppContextType {
   classes: SchoolClass[];
   moodLogs: MoodLog[];
   careNotes: CareNote[];
+  chatSessions: ChatSession[];
+  activeSessionId: string | null;
+  activeChatSession: ChatSession | null;
   chatHistory: ChatMessage[];
   crisisAlerts: CrisisAlert[];
   chatAccessLogs: ChatAccessLog[];
@@ -106,6 +110,8 @@ interface AppContextType {
   isAiTyping: boolean;
   lastChatError: string | null;
   clearChatError: () => void;
+  startNewChatSession: () => string;
+  selectChatSession: (sessionId: string) => void;
   addMoodLog: (mood: MoodType, score: number, tags: string[], note?: string) => Promise<MoodLog>;
   addCareNote: (
     studentId: string,
@@ -134,6 +140,28 @@ interface AppContextType {
   cleanupLegacyPresetUsers: () => Promise<{ deletedUsers: number; deletedClasses: number }>;
 }
 
+function dedupeById<T extends { id: string }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  const result: T[] = [];
+  for (const item of items) {
+    if (!item.id || seen.has(item.id)) continue;
+    seen.add(item.id);
+    result.push(item);
+  }
+  return result;
+}
+
+function upsertMessageSorted(list: ChatMessage[], msg: ChatMessage): ChatMessage[] {
+  const filtered = list.filter((m) => m.id !== msg.id);
+  filtered.push(msg);
+  filtered.sort(
+    (a, b) =>
+      (a.createdAtMs || 0) - (b.createdAtMs || 0) ||
+      (a.createdAt || '').localeCompare(b.createdAt || '')
+  );
+  return filtered;
+}
+
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -154,6 +182,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [classes, setClasses] = useState<SchoolClass[]>([]);
   const [moodLogs, setMoodLogs] = useState<MoodLog[]>([]);
   const [careNotes, setCareNotes] = useState<CareNote[]>([]);
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+  const [chatSessionsLoaded, setChatSessionsLoaded] = useState<boolean>(false);
+  const [chatMessagesLoaded, setChatMessagesLoaded] = useState<boolean>(false);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [chatMessagesMap, setChatMessagesMap] = useState<Record<string, ChatMessage[]>>({});
   const [crisisAlerts, setCrisisAlerts] = useState<CrisisAlert[]>([]);
   const [chatAccessLogs, setChatAccessLogs] = useState<ChatAccessLog[]>([]);
@@ -166,6 +198,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setClasses([]);
     setMoodLogs([]);
     setCareNotes([]);
+    setChatSessions([]);
+    setChatSessionsLoaded(false);
+    setChatMessagesLoaded(false);
+    setActiveSessionId(null);
     setChatMessagesMap({});
     setCrisisAlerts([]);
     setChatAccessLogs([]);
@@ -283,7 +319,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const unsubClasses = onSnapshot(
         collection(db, 'classes'),
         (snapshot) => {
-          setClasses(snapshot.docs.map((d) => d.data() as SchoolClass));
+          const list = snapshot.docs.map((d) => {
+            const data = d.data() as SchoolClass;
+            return { ...data, id: data.id || d.id };
+          });
+          setClasses(dedupeById(list));
         },
         (error) => {
           handleFirestoreError(error, OperationType.GET, 'classes');
@@ -296,7 +336,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const unsubUsers = onSnapshot(
           collection(db, 'users'),
           (snapshot) => {
-            setUsers(snapshot.docs.map((d) => d.data() as User));
+            const list = snapshot.docs.map((d) => {
+              const data = d.data() as User;
+              return { ...data, id: data.id || d.id };
+            });
+            setUsers(dedupeById(list));
           },
           (error) => handleFirestoreError(error, OperationType.GET, 'users')
         );
@@ -309,8 +353,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             where('role', '==', 'student')
           ),
           (snapshot) => {
-            const studentsList = snapshot.docs.map((d) => d.data() as User);
-            setUsers([currentUser, ...studentsList.filter((s) => s.id !== currentUser.id)]);
+            const studentsList = snapshot.docs.map((d) => {
+              const data = d.data() as User;
+              return { ...data, id: data.id || d.id };
+            });
+            setUsers(dedupeById([currentUser, ...studentsList.filter((s) => s.id !== currentUser.id)]));
           },
           (error) => handleFirestoreError(error, OperationType.GET, 'users')
         );
@@ -348,7 +395,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const unsubMood = onSnapshot(
           moodQueryRef,
           (snapshot) => {
-            const list = snapshot.docs.map((d) => d.data() as MoodLog);
+            const list = dedupeById(
+              snapshot.docs.map((d) => {
+                const data = d.data() as MoodLog;
+                return { ...data, id: data.id || d.id };
+              })
+            );
             list.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0) || (b.createdAt || b.date).localeCompare(a.createdAt || a.date));
             setMoodLogs(list);
           },
@@ -369,7 +421,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const unsubCare = onSnapshot(
           careQueryRef,
           (snapshot) => {
-            const list = snapshot.docs.map((d) => d.data() as CareNote);
+            const list = dedupeById(
+              snapshot.docs.map((d) => {
+                const data = d.data() as CareNote;
+                return { ...data, id: data.id || d.id };
+              })
+            );
             list.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0) || b.createdAt.localeCompare(a.createdAt));
             setCareNotes(list);
           },
@@ -394,11 +451,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           (snapshot) => {
             const grouped: Record<string, ChatMessage[]> = {};
             snapshot.docs.forEach((d) => {
-              const msg = d.data() as ChatMessage;
+              const raw = d.data() as ChatMessage;
+              const msg: ChatMessage = { ...raw, id: raw.id || d.id };
               if (!grouped[msg.studentId]) grouped[msg.studentId] = [];
               grouped[msg.studentId].push(msg);
             });
             for (const sid of Object.keys(grouped)) {
+              grouped[sid] = dedupeById(grouped[sid]);
               grouped[sid].sort(
                 (a, b) =>
                   (a.createdAtMs || 0) - (b.createdAtMs || 0) ||
@@ -406,10 +465,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               );
             }
             setChatMessagesMap(grouped);
+            setChatMessagesLoaded(true);
           },
           (error) => handleFirestoreError(error, OperationType.GET, 'chat_messages')
         );
         unsubs.push(unsubChat);
+      }
+
+      // Chat sessions listener — strictly scoped!
+      let sessionQueryRef: ReturnType<typeof query> | ReturnType<typeof collection> | null = null;
+      if (currentUser.role === 'admin') {
+        sessionQueryRef = collection(db, 'chat_sessions');
+      } else if (currentUser.role === 'teacher' && currentUser.classId) {
+        sessionQueryRef = query(collection(db, 'chat_sessions'), where('classId', '==', currentUser.classId));
+      } else if (currentUser.role === 'student') {
+        sessionQueryRef = query(collection(db, 'chat_sessions'), where('studentId', '==', uid));
+      }
+
+      if (sessionQueryRef) {
+        const unsubSessions = onSnapshot(
+          sessionQueryRef,
+          (snapshot) => {
+            const list = dedupeById(
+              snapshot.docs.map((d) => {
+                const data = d.data() as ChatSession;
+                return { ...data, id: data.id || d.id };
+              })
+            );
+            list.sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0));
+            setChatSessions(list);
+            setChatSessionsLoaded(true);
+          },
+          (error) => handleFirestoreError(error, OperationType.GET, 'chat_sessions')
+        );
+        unsubs.push(unsubSessions);
       }
 
       // Crisis alerts listener
@@ -426,7 +515,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const unsubAlerts = onSnapshot(
           alertQueryRef,
           (snapshot) => {
-            const list = snapshot.docs.map((d) => d.data() as CrisisAlert);
+            const list = dedupeById(
+              snapshot.docs.map((d) => {
+                const data = d.data() as CrisisAlert;
+                return { ...data, id: data.id || d.id };
+              })
+            );
             list.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
             setCrisisAlerts(list);
           },
@@ -447,7 +541,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const unsubAudit = onSnapshot(
           auditQueryRef,
           (snapshot) => {
-            const list = snapshot.docs.map((d) => d.data() as ChatAccessLog);
+            const list = dedupeById(
+              snapshot.docs.map((d) => {
+                const data = d.data() as ChatAccessLog;
+                return { ...data, id: data.id || d.id };
+              })
+            );
             list.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0) || b.timestamp.localeCompare(a.timestamp));
             setChatAccessLogs(list);
           },
@@ -611,7 +710,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const chatHistory = currentUser ? chatMessagesMap[currentUser.id] || [] : [];
+  // Restore latest Firebase session automatically on reload / re-login for students
+  useEffect(() => {
+    if (!currentUser || currentUser.role !== 'student') return;
+    if (!chatSessionsLoaded || !chatMessagesLoaded) return;
+    if (activeSessionId) return;
+
+    const studentSessions = chatSessions.filter((s) => s.studentId === currentUser.id);
+    const allStudentMsgs = chatMessagesMap[currentUser.id] || [];
+    const legacySessionId = `legacy-${currentUser.id}`;
+    const hasLegacyMsgs = allStudentMsgs.some((m) => !m.sessionId || m.sessionId === legacySessionId);
+
+    if (studentSessions.length > 0) {
+      setActiveSessionId(studentSessions[0].id);
+    } else if (hasLegacyMsgs) {
+      setActiveSessionId(legacySessionId);
+    } else {
+      const freshId = doc(collection(db, 'chat_sessions')).id;
+      setActiveSessionId(freshId);
+    }
+  }, [currentUser, chatSessionsLoaded, chatMessagesLoaded, activeSessionId, chatSessions, chatMessagesMap]);
+
+  const startNewChatSession = useCallback(() => {
+    const freshId = doc(collection(db, 'chat_sessions')).id;
+    setActiveSessionId(freshId);
+    setLastChatError(null);
+    return freshId;
+  }, []);
+
+  const selectChatSession = useCallback((sessionId: string) => {
+    setActiveSessionId(sessionId);
+    setLastChatError(null);
+  }, []);
+
+  const activeChatSession = useMemo(() => {
+    if (!currentUser || !activeSessionId) return null;
+    return chatSessions.find((s) => s.id === activeSessionId && s.studentId === currentUser.id) || null;
+  }, [currentUser, chatSessions, activeSessionId]);
+
+  const chatHistory = useMemo(() => {
+    if (!currentUser) return [];
+    const allMsgs = chatMessagesMap[currentUser.id] || [];
+    const legacySessionId = `legacy-${currentUser.id}`;
+    const targetSessionId = activeSessionId || legacySessionId;
+    return allMsgs.filter((m) => (m.sessionId || legacySessionId) === targetSessionId);
+  }, [currentUser, chatMessagesMap, activeSessionId]);
 
   // Add/Update Daily Mood Log (Deterministic 1 doc per student per Taiwan day; awaits confirmation)
   const addMoodLog = async (
@@ -694,7 +837,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setLastSyncError(null);
     try {
       await setDoc(noteRef, stripUndefined(newNote));
-      setCareNotes((prev) => [newNote, ...prev]);
+      setCareNotes((prev) => [newNote, ...prev.filter((n) => n.id !== noteId)]);
       setSyncStatus('synced');
     } catch (err: any) {
       setSyncStatus('error');
@@ -751,6 +894,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSyncStatus('syncing');
     try {
       await updateDoc(doc(db, 'crisis_alerts', alertId), updates);
+      if (status === 'resolved') {
+        const targetAlert = crisisAlerts.find((a) => a.id === alertId);
+        if (targetAlert?.sessionId) {
+          const remainingOpen = crisisAlerts.some(
+            (a) =>
+              a.id !== alertId &&
+              a.sessionId === targetAlert.sessionId &&
+              a.status !== 'resolved'
+          );
+          if (!remainingOpen) {
+            const targetSession = chatSessions.find((s) => s.id === targetAlert.sessionId);
+            if (targetSession && targetSession.unresolvedHighRisk) {
+              await setDoc(
+                doc(db, 'chat_sessions', targetSession.id),
+                stripUndefined({
+                  ...targetSession,
+                  unresolvedHighRisk: false,
+                  unresolvedEvents: [],
+                  updatedAt: nowStr,
+                  updatedAtMs: Date.now(),
+                }),
+                { merge: true }
+              ).catch(() => {});
+            }
+          }
+        }
+      }
       setSyncStatus('synced');
     } catch (err) {
       setSyncStatus('error');
@@ -780,12 +950,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    // 1. Create and persist student message FIRST (Firestore auto-ID)
+    const legacySessionId = `legacy-${studentId}`;
+    const targetSessionId = activeSessionId || doc(collection(db, 'chat_sessions')).id;
+    if (!activeSessionId) {
+      setActiveSessionId(targetSessionId);
+    }
+
+    const existingSession = chatSessions.find((s) => s.id === targetSessionId);
+    const sessionMessages = (chatMessagesMap[studentId] || []).filter(
+      (m) => (m.sessionId || legacySessionId) === targetSessionId
+    );
+
+    // 1. Ensure session document exists and create/persist student message FIRST
     const msgRef = doc(collection(db, 'chat_messages'));
     const msgId = msgRef.id;
 
     const userMsg: ChatMessage = {
       id: msgId,
+      sessionId: targetSessionId,
       studentId,
       studentName: currentUser.name,
       classId: currentUser.classId || '',
@@ -797,18 +979,56 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAtMs: nowMs,
     };
 
-    // Capture history BEFORE appending userMsg so backend does NOT receive duplicate user turn!
-    const priorHistory = (chatMessagesMap[studentId] || [])
-      .filter((m) => m.aiStatus !== 'error_notice' && m.aiStatus !== 'safety_fallback')
-      .slice(-10)
-      .map((m) => ({ sender: m.sender, text: m.text }));
+    // Capture full chronological session history BEFORE appending userMsg
+    const priorHistory = sessionMessages
+      .filter((m) => m.aiStatus !== 'error_notice')
+      .slice(-40)
+      .map((m) => ({
+        id: m.id,
+        sessionId: m.sessionId || targetSessionId,
+        studentId: m.studentId,
+        sender: m.sender,
+        text: m.text,
+        modelDetectedEmotion: m.modelDetectedEmotion,
+        situationCategory: m.situationCategory,
+        riskLevel: m.riskLevel,
+        aiStatus: m.aiStatus,
+        createdAt: m.createdAt,
+        createdAtMs: m.createdAtMs,
+      }));
+
+    const baseSessionDoc: ChatSession = existingSession || {
+      id: targetSessionId,
+      studentId,
+      studentName: currentUser.name,
+      classId: currentUser.classId,
+      title: trimmed.slice(0, 24) || '與心心的對話',
+      highestRiskLevel: 'none',
+      unresolvedHighRisk: false,
+      unresolvedEvents: [],
+      messageCount: sessionMessages.length,
+      createdAt: isoTime,
+      updatedAt: isoTime,
+      createdAtMs: nowMs,
+      updatedAtMs: nowMs,
+    };
 
     setSyncStatus('syncing');
     try {
+      await setDoc(
+        doc(db, 'chat_sessions', targetSessionId),
+        stripUndefined({
+          ...baseSessionDoc,
+          updatedAt: isoTime,
+          updatedAtMs: nowMs,
+          messageCount: sessionMessages.length + 1,
+        }),
+        { merge: true }
+      );
       await setDoc(msgRef, stripUndefined(userMsg));
       setChatMessagesMap((prev) => ({
         ...prev,
-        [studentId]: [...(prev[studentId] || []), userMsg],
+        [studentId]: upsertMessageSorted(prev[studentId] || [], userMsg),
       }));
       setSyncStatus('synced');
     } catch (err: any) {
@@ -829,6 +1049,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           Authorization: `Bearer ${idToken}`,
         },
         body: JSON.stringify({
+          sessionId: targetSessionId,
           message: trimmed,
           mood: todayLog?.mood,
           history: priorHistory,
@@ -851,6 +1072,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             const alertRef = doc(collection(db, 'crisis_alerts'));
             const alertPayload: CrisisAlert = {
               id: alertRef.id,
+              sessionId: targetSessionId,
               studentId,
               studentName: currentUser.name,
               classId: currentUser.classId,
@@ -873,6 +1095,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const noticeRef = doc(collection(db, 'chat_messages'));
         const noticeMsg: ChatMessage = {
           id: noticeRef.id,
+          sessionId: targetSessionId,
           studentId,
           studentName: currentUser.name,
           classId: currentUser.classId,
@@ -909,6 +1132,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const alertRef = doc(collection(db, 'crisis_alerts'));
           const alertPayload: CrisisAlert = {
             id: alertRef.id,
+            sessionId: targetSessionId,
             studentId,
             studentName: currentUser.name,
             classId: currentUser.classId,
@@ -930,9 +1154,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
+      const aiNowMs = Date.now();
+      const aiNowStr = getTaiwanDateTimeString();
       const aiRef = doc(collection(db, 'chat_messages'));
       const aiMsg: ChatMessage = {
         id: aiRef.id,
+        sessionId: targetSessionId,
         studentId,
         studentName: currentUser.name,
         classId: currentUser.classId,
@@ -943,18 +1170,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         emotionTag: data.modelDetectedEmotion,
         situationCategory: data.situationCategory,
         riskLevel: data.riskLevel || 'none',
+        hasContradictionOrFollowUp: Boolean(data.hasContradictionOrFollowUp),
+        unresolvedHighRisk: Boolean(data.unresolvedHighRisk),
         aiStatus: 'gemini',
         teacherNotified,
         timestamp: getTaiwanTimeString(),
-        createdAt: getTaiwanDateTimeString(),
-        createdAtMs: Date.now(),
+        createdAt: aiNowStr,
+        createdAtMs: aiNowMs,
       };
 
       await setDoc(aiRef, stripUndefined(aiMsg));
       setChatMessagesMap((prev) => ({
         ...prev,
-        [studentId]: [...(prev[studentId] || []), aiMsg],
+        [studentId]: upsertMessageSorted(prev[studentId] || [], aiMsg),
       }));
+
+      // Sync rolling session memory & unresolved high-risk status to Firestore
+      const updatedSession: ChatSession = {
+        ...baseSessionDoc,
+        rollingSummary:
+          typeof data.sessionMemorySummary === 'string' && data.sessionMemorySummary.trim()
+            ? data.sessionMemorySummary.trim().slice(0, 1800)
+            : baseSessionDoc.rollingSummary,
+        summarizedUpToMs:
+          typeof data.summarizedUpToMs === 'number'
+            ? data.summarizedUpToMs
+            : baseSessionDoc.summarizedUpToMs,
+        highestRiskLevel: data.sessionHighestRisk || baseSessionDoc.highestRiskLevel || 'none',
+        unresolvedHighRisk: Boolean(data.unresolvedHighRisk),
+        unresolvedEvents: Array.isArray(data.unresolvedEvents) ? data.unresolvedEvents.slice(0, 5) : [],
+        lastEmotion: data.modelDetectedEmotion,
+        lastSituationCategory: data.situationCategory,
+        messageCount: sessionMessages.length + 2,
+        updatedAt: aiNowStr,
+        updatedAtMs: aiNowMs,
+      };
+      await setDoc(doc(db, 'chat_sessions', targetSessionId), stripUndefined(updatedSession), {
+        merge: true,
+      }).catch((e) => console.warn('Could not sync chat session memory:', e));
     } catch (err: any) {
       console.error('Chat API Network Error:', err);
       const errMsgText = '無法連線至 AI 伺服器，請檢查網路後重試。';
@@ -963,6 +1216,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const errNoticeRef = doc(collection(db, 'chat_messages'));
       const errNoticeMsg: ChatMessage = {
         id: errNoticeRef.id,
+        sessionId: targetSessionId,
         studentId,
         studentName: currentUser.name,
         classId: currentUser.classId,
@@ -1338,6 +1592,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         classes,
         moodLogs,
         careNotes,
+        chatSessions,
+        activeSessionId,
+        activeChatSession,
         chatHistory,
         crisisAlerts,
         chatAccessLogs,
@@ -1345,6 +1602,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isAiTyping,
         lastChatError,
         clearChatError: () => setLastChatError(null),
+        startNewChatSession,
+        selectChatSession,
         addMoodLog,
         addCareNote,
         sendChatMessage,

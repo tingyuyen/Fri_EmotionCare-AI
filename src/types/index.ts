@@ -72,8 +72,29 @@ export interface CareNote {
   createdAtMs?: number;
 }
 
+export interface ChatSession {
+  id: string;
+  studentId: string;
+  studentName?: string;
+  classId: string;
+  title: string;
+  rollingSummary?: string;
+  summarizedUpToMs?: number;
+  highestRiskLevel?: RiskLevel;
+  unresolvedHighRisk?: boolean;
+  unresolvedEvents?: string[];
+  lastEmotion?: MoodType;
+  lastSituationCategory?: ChatSituationCategory;
+  messageCount?: number;
+  createdAt: string;
+  updatedAt: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
 export interface ChatMessage {
   id: string;
+  sessionId?: string;
   studentId: string;
   studentName?: string;
   classId?: string;
@@ -84,6 +105,8 @@ export interface ChatMessage {
   emotionTag?: MoodType; // Legacy / display alias
   situationCategory?: ChatSituationCategory;
   riskLevel?: RiskLevel;
+  hasContradictionOrFollowUp?: boolean;
+  unresolvedHighRisk?: boolean;
   aiStatus?: 'gemini' | 'error_notice' | 'safety_fallback';
   teacherNotified?: boolean;
   timestamp: string; // HH:mm (Asia/Taipei)
@@ -93,6 +116,7 @@ export interface ChatMessage {
 
 export interface CrisisAlert {
   id: string;
+  sessionId?: string;
   studentId: string;
   studentName: string;
   classId: string;

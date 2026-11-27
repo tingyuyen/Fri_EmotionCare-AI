@@ -9,6 +9,8 @@ import {
   CheckCircle2,
   X,
   Info,
+  Plus,
+  MessageSquare,
 } from 'lucide-react';
 import { MOOD_DEFINITIONS, SITUATION_LABELS } from '../../types';
 
@@ -29,8 +31,12 @@ const QUICK_CHIPS = [
 export const StudentAIChat: React.FC<StudentAIChatProps> = ({ onOpenBreathing }) => {
   const {
     currentUser,
+    chatSessions,
+    activeSessionId,
     chatHistory,
     sendChatMessage,
+    startNewChatSession,
+    selectChatSession,
     isAiTyping,
     moodLogs,
     todayDate,
@@ -112,6 +118,16 @@ export const StudentAIChat: React.FC<StudentAIChatProps> = ({ onOpenBreathing })
         <div className="flex items-center gap-2">
           <button
             type="button"
+            disabled={isAiTyping || chatHistory.length === 0}
+            onClick={() => startNewChatSession()}
+            title="開啟一個全新的獨立對話，不混用先前話題紀錄"
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-teal-50 hover:bg-teal-100 disabled:opacity-40 text-teal-800 rounded-xl text-xs font-bold border border-teal-200 transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5 text-teal-600" />
+            <span>新對話</span>
+          </button>
+          <button
+            type="button"
             onClick={onOpenBreathing}
             className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-800 rounded-xl text-xs font-bold border border-sky-200 transition-colors"
           >
@@ -128,6 +144,39 @@ export const StudentAIChat: React.FC<StudentAIChatProps> = ({ onOpenBreathing })
           </button>
         </div>
       </div>
+
+      {/* Session Switcher Strip (isolated per student & session, restored from Firebase) */}
+      {(() => {
+        const mySessions = chatSessions.filter((s) => s.studentId === currentUser.id);
+        if (mySessions.length === 0) return null;
+        const activeInList = mySessions.some((s) => s.id === activeSessionId);
+        return (
+          <div className="px-6 py-2 bg-slate-50/90 border-b border-slate-200/70 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 min-w-0">
+              <MessageSquare className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+              <span className="font-bold text-slate-600 shrink-0">目前對話紀錄：</span>
+              <select
+                value={activeSessionId || mySessions[0].id}
+                onChange={(e) => selectChatSession(e.target.value)}
+                disabled={isAiTyping}
+                className="max-w-[240px] sm:max-w-xs px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-700 font-medium text-xs focus:outline-none focus:border-teal-500 truncate"
+              >
+                {!activeInList && activeSessionId && (
+                  <option value={activeSessionId}>（新對話｜尚未傳送訊息）</option>
+                )}
+                {mySessions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.title}（{s.updatedAt.slice(5, 16)}）
+                  </option>
+                ))}
+              </select>
+            </div>
+            <span className="text-[11px] text-slate-500">
+              已同步雲端上下文記憶（共 {chatHistory.length} 則訊息）
+            </span>
+          </div>
+        );
+      })()}
 
       {/* School Privacy & Care Policy Disclosure Banner */}
       <div className="px-6 py-2 bg-amber-50/80 border-b border-amber-200/80 text-[11px] text-amber-900 flex items-center justify-between gap-2">

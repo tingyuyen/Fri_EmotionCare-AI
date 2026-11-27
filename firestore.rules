@@ -139,27 +139,58 @@ service cloud.firestore {
     function isValidChatMessage(data) {
       return data.keys().hasAll(['id', 'studentId', 'classId', 'sender', 'text']) &&
         data.keys().hasOnly([
-          'id', 'studentId', 'studentName', 'classId', 'sender', 'text',
+          'id', 'sessionId', 'studentId', 'studentName', 'classId', 'sender', 'text',
           'selfReportedMood', 'modelDetectedEmotion', 'emotionTag',
-          'situationCategory', 'riskLevel', 'aiStatus', 'teacherNotified',
+          'situationCategory', 'riskLevel', 'hasContradictionOrFollowUp',
+          'unresolvedHighRisk', 'aiStatus', 'teacherNotified',
           'timestamp', 'createdAt', 'createdAtMs'
+        ]) &&
+        data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+        (!('sessionId' in data) || (data.sessionId is string && data.sessionId.size() > 0 && data.sessionId.size() <= 128)) &&
+        data.studentId is string && data.studentId.size() > 0 && data.studentId.size() <= 128 &&
+        data.classId is string && data.classId.size() > 0 && data.classId.size() <= 64 &&
+        data.sender in ['student', 'ai'] &&
+        data.text is string && data.text.size() > 0 && data.text.size() <= 4000 &&
+        (!('hasContradictionOrFollowUp' in data) || data.hasContradictionOrFollowUp is bool) &&
+        (!('unresolvedHighRisk' in data) || data.unresolvedHighRisk is bool);
+    }
+
+    function isValidChatSession(data) {
+      return data.keys().hasAll(['id', 'studentId', 'classId', 'title', 'createdAtMs', 'updatedAtMs']) &&
+        data.keys().hasOnly([
+          'id', 'studentId', 'studentName', 'classId', 'title',
+          'rollingSummary', 'summarizedUpToMs', 'highestRiskLevel',
+          'unresolvedHighRisk', 'unresolvedEvents', 'lastEmotion',
+          'lastSituationCategory', 'messageCount',
+          'createdAt', 'updatedAt', 'createdAtMs', 'updatedAtMs'
         ]) &&
         data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
         data.studentId is string && data.studentId.size() > 0 && data.studentId.size() <= 128 &&
         data.classId is string && data.classId.size() > 0 && data.classId.size() <= 64 &&
-        data.sender in ['student', 'ai'] &&
-        data.text is string && data.text.size() > 0 && data.text.size() <= 4000;
+        data.title is string && data.title.size() > 0 && data.title.size() <= 100 &&
+        data.createdAtMs is number &&
+        data.updatedAtMs is number &&
+        (!('studentName' in data) || (data.studentName is string && data.studentName.size() <= 64)) &&
+        (!('rollingSummary' in data) || (data.rollingSummary is string && data.rollingSummary.size() <= 2000)) &&
+        (!('summarizedUpToMs' in data) || data.summarizedUpToMs is number) &&
+        (!('highestRiskLevel' in data) || data.highestRiskLevel in ['none', 'low', 'elevated', 'critical']) &&
+        (!('unresolvedHighRisk' in data) || data.unresolvedHighRisk is bool) &&
+        (!('unresolvedEvents' in data) || (data.unresolvedEvents is list && data.unresolvedEvents.size() <= 10 && (data.unresolvedEvents.size() == 0 || data.unresolvedEvents[0] is string))) &&
+        (!('lastEmotion' in data) || data.lastEmotion in ['happy', 'calm', 'anxious', 'sad', 'angry', 'tired']) &&
+        (!('lastSituationCategory' in data) || (data.lastSituationCategory is string && data.lastSituationCategory.size() <= 50)) &&
+        (!('messageCount' in data) || data.messageCount is number);
     }
 
     function isValidCrisisAlert(data) {
       return data.keys().hasAll(['id', 'studentId', 'classId', 'situationCategory', 'severity', 'status', 'createdAtMs']) &&
         data.keys().hasOnly([
-          'id', 'studentId', 'studentName', 'classId', 'className',
+          'id', 'sessionId', 'studentId', 'studentName', 'classId', 'className',
           'situationCategory', 'severity', 'triggerExcerpt', 'aiSummary',
           'status', 'acknowledgedBy', 'acknowledgedByName', 'acknowledgedAt',
           'resolutionNote', 'createdAt', 'createdAtMs'
         ]) &&
         data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+        (!('sessionId' in data) || (data.sessionId is string && data.sessionId.size() > 0 && data.sessionId.size() <= 128)) &&
         data.studentId is string && data.studentId.size() > 0 && data.studentId.size() <= 128 &&
         data.classId is string && data.classId.size() > 0 && data.classId.size() <= 64 &&
         data.severity in ['elevated', 'critical'] &&
@@ -345,6 +376,44 @@ service cloud.firestore {
       allow update: if false;
 
       allow delete: if isAdmin() && isValidId(messageId);
+    }
+
+    // 5b. Chat Sessions Collection (Session-level context memory & risk tracking)
+    match /chat_sessions/{sessionId} {
+      allow get: if isVerified() && isValidId(sessionId) && (
+        (isActiveUser() && existing().studentId == request.auth.uid) ||
+        isTeacherOfClass(existing().classId) ||
+        isAdmin()
+      );
+
+      allow list: if isVerified() && (
+        (isActiveUser() && existing().studentId == request.auth.uid) ||
+        isTeacherOfClass(existing().classId) ||
+        isAdmin()
+      );
+
+      allow create: if isVerified() && isValidId(sessionId) && isValidChatSession(incoming()) && (
+        isAdmin() ||
+        (isActiveUser() &&
+         incoming().studentId == request.auth.uid &&
+         incoming().classId == getUserData().get('classId', '') &&
+         incoming().id == sessionId)
+      );
+
+      allow update: if isVerified() && isValidId(sessionId) && isValidChatSession(incoming()) && (
+        isAdmin() ||
+        (isActiveUser() &&
+         existing().studentId == request.auth.uid &&
+         incoming().studentId == existing().studentId &&
+         incoming().classId == existing().classId &&
+         incoming().id == existing().id) ||
+        (isTeacherOfClass(existing().classId) &&
+         incoming().studentId == existing().studentId &&
+         incoming().classId == existing().classId &&
+         incoming().id == existing().id)
+      );
+
+      allow delete: if isAdmin() && isValidId(sessionId);
     }
 
     // 6. Crisis Alerts Collection (Immediate safety escalation & teacher acknowledgement)

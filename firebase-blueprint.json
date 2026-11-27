@@ -253,6 +253,11 @@
           "description": "訊息識別碼",
           "maxLength": 128
         },
+        "sessionId": {
+          "type": "string",
+          "description": "對話 Session 識別碼",
+          "maxLength": 128
+        },
         "studentId": {
           "type": "string",
           "description": "學生 UID",
@@ -303,6 +308,14 @@
           "description": "安全風險等級",
           "enum": ["none", "low", "elevated", "critical"]
         },
+        "hasContradictionOrFollowUp": {
+          "type": "boolean",
+          "description": "是否與先前對話事件存在關聯或矛盾"
+        },
+        "unresolvedHighRisk": {
+          "type": "boolean",
+          "description": "本對話 Session 是否仍有未解決之高風險事件"
+        },
         "aiStatus": {
           "type": "string",
           "description": "回覆來源狀態",
@@ -327,6 +340,91 @@
       },
       "required": ["id", "studentId", "classId", "sender", "text"]
     },
+    "ChatSession": {
+      "title": "ChatSession",
+      "description": "學生與 AI 聊天對話 Session 及上下文記憶摘要",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "對話 Session 識別碼",
+          "maxLength": 128
+        },
+        "studentId": {
+          "type": "string",
+          "description": "學生 UID",
+          "maxLength": 128
+        },
+        "studentName": {
+          "type": "string",
+          "description": "學生姓名",
+          "maxLength": 64
+        },
+        "classId": {
+          "type": "string",
+          "description": "班級代碼",
+          "maxLength": 64
+        },
+        "title": {
+          "type": "string",
+          "description": "對話標題",
+          "maxLength": 100
+        },
+        "rollingSummary": {
+          "type": "string",
+          "description": "較早歷史對話摘要（控制 Token 用量）",
+          "maxLength": 2000
+        },
+        "summarizedUpToMs": {
+          "type": "number",
+          "description": "已摘要之最新訊息毫秒時間戳"
+        },
+        "highestRiskLevel": {
+          "type": "string",
+          "description": "此 Session 出現過之最高風險等級",
+          "enum": ["none", "low", "elevated", "critical"]
+        },
+        "unresolvedHighRisk": {
+          "type": "boolean",
+          "description": "此 Session 是否有尚未妥善處理的高風險事件"
+        },
+        "unresolvedEvents": {
+          "type": "array",
+          "description": "尚未解決的重要事件與風險追蹤清單"
+        },
+        "lastEmotion": {
+          "type": "string",
+          "description": "最近一次辨識情緒",
+          "enum": ["happy", "calm", "anxious", "sad", "angry", "tired"]
+        },
+        "lastSituationCategory": {
+          "type": "string",
+          "description": "最近一次情境分類",
+          "maxLength": 50
+        },
+        "messageCount": {
+          "type": "number",
+          "description": "此 Session 訊息總數"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "建立時間"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "更新時間"
+        },
+        "createdAtMs": {
+          "type": "number",
+          "description": "建立毫秒時間戳"
+        },
+        "updatedAtMs": {
+          "type": "number",
+          "description": "更新毫秒時間戳"
+        }
+      },
+      "required": ["id", "studentId", "classId", "title", "createdAtMs", "updatedAtMs"]
+    },
     "CrisisAlert": {
       "title": "CrisisAlert",
       "description": "校園安全危機通報與導師即時預警通知",
@@ -335,6 +433,11 @@
         "id": {
           "type": "string",
           "description": "通報紀錄代碼",
+          "maxLength": 128
+        },
+        "sessionId": {
+          "type": "string",
+          "description": "觸發通報的對話 Session 識別碼",
           "maxLength": 128
         },
         "studentId": {
@@ -488,6 +591,10 @@
     "/chat_messages/{messageId}": {
       "schema": "ChatMessage",
       "description": "AI 聊天室對話歷史"
+    },
+    "/chat_sessions/{sessionId}": {
+      "schema": "ChatSession",
+      "description": "學生 AI 聊天對話 Session 與上下文記憶"
     },
     "/crisis_alerts/{alertId}": {
       "schema": "CrisisAlert",

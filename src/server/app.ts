@@ -497,6 +497,81 @@ async function firestoreRestCreateDoc(
   return true;
 }
 
+async function firestoreRestSetDoc(
+  collectionName: string,
+  docId: string,
+  data: Record<string, any>,
+  idToken: string
+): Promise<boolean> {
+  if (!fbConfig.projectId) return false;
+  const url = `https://firestore.googleapis.com/v1/projects/${fbConfig.projectId}/databases/${fbConfig.firestoreDatabaseId}/documents/${collectionName}/${encodeURIComponent(docId)}`;
+  const fields: Record<string, any> = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (v !== undefined) fields[k] = toFirestoreValue(v);
+  }
+  const resp = await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ fields }),
+  });
+  if (!resp.ok) {
+    const errText = await resp.text();
+    console.warn(`Firestore REST set ${collectionName}/${docId} failed (${resp.status}):`, errText);
+    return false;
+  }
+  return true;
+}
+
+async function firestoreRestQueryByField(
+  collectionName: string,
+  fieldPath: string,
+  stringValue: string,
+  idToken: string
+): Promise<Array<Record<string, any>>> {
+  if (!fbConfig.projectId) return [];
+  const url = `https://firestore.googleapis.com/v1/projects/${fbConfig.projectId}/databases/${fbConfig.firestoreDatabaseId}/documents:runQuery`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      structuredQuery: {
+        from: [{ collectionId: collectionName }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath },
+            op: 'EQUAL',
+            value: { stringValue },
+          },
+        },
+      },
+    }),
+  });
+  if (!resp.ok) {
+    const errText = await resp.text();
+    console.warn(`Firestore REST runQuery ${collectionName} failed (${resp.status}):`, errText);
+    return [];
+  }
+  const rows = (await resp.json()) as Array<{ document?: { name?: string; fields?: Record<string, any> } }>;
+  if (!Array.isArray(rows)) return [];
+  const docs: Array<Record<string, any>> = [];
+  for (const row of rows) {
+    if (!row.document?.fields) continue;
+    const parsed = fromFirestoreFields(row.document.fields);
+    if (!parsed.id && row.document.name) {
+      const parts = row.document.name.split('/');
+      parsed.id = parts[parts.length - 1];
+    }
+    docs.push(parsed);
+  }
+  return docs;
+}
+
 async function getCallerProfile(authUser: AuthenticatedUser) {
   if (hasAdminSdkCredentialsConfigured()) {
     try {
@@ -615,7 +690,8 @@ async function requireTeacherOrAdmin(req: AuthedRequest, res: Response, next: Ne
 const MINUTE_LIMIT_PER_USER = 12;
 const DAILY_LIMIT_PER_USER = 60;
 const MAX_MESSAGE_LENGTH = 600;
-const MAX_HISTORY_TURNS = 10;
+const RECENT_VERBATIM_MESSAGES = 12;
+const MAX_OLDER_DIGEST_CHARS = 1200;
 
 interface UsageBucket {
   date: string;
@@ -682,47 +758,88 @@ function checkAndConsumeQuota(uid: string): { allowed: boolean; reason?: string;
   };
 }
 
-// Natural, non-formulaic System Instruction tailored for Taiwan elementary school students (7-12 y/o)
+// Guide-role System Instruction tailored for Taiwan elementary school students (7-12 y/o)
 const XINXIN_SYSTEM_INSTRUCTION = `
-你是「心心」，台灣國小校園裡的 AI 聊天夥伴，陪伴 7 到 12 歲（小學一年級到六年級）的學生聊天。
+你是「心心」，台灣國小校園裡的 AI 情緒關懷引導者，陪伴 7 到 12 歲（小學一年級到六年級）的學生。
 
-【核心對話原則 — 絕對禁止制式模板】
-1. 絕對不要每句都用「我知道你很難過」、「給你一個大大的擁抱」、「你不是一個人」、「心心一直都在」這類重複的公式化安慰語。
-2. 絕對不要每次都使用愛心、擁抱、固定的表情符號或固定的開場白；表情符號可有可無，偶爾自然用 0～1 個就好。
-3. 必須根據學生「這一則實際說了什麼」以及「前面的對話脈絡」自然接話，延續話題，不要問前面已經回答過的問題。
-4. 絕對不要擅自猜測或硬塞情緒給學生：學生說考一百分或今天很開心，就真誠替他高興、聊聊他怎麼做到的或接下來想做什麼；一般日常聊天就輕鬆、好奇、自然地聊。不要把所有話題都轉成負面情緒或心靈雞湯！
-5. 每次回覆以 1～3 句自然、口語、台灣國小學生聽得懂的繁體中文為主，不要長篇大論、不要說教、不要給大道理。
-6. 適時提出一個具體、好回答的小問題，幫助學生多說一點他的想法（一般聊天或開心時也可以問有趣的問題）。
+【一、AI 角色定位與核心原則】
+1. 透過傾聽、同理與提問，協助學生認識與理解自己的情緒、思考問題發生的原因，並培養自主解決問題的能力。
+2. 你的主要任務不是直接提供答案，而是引導學生思考，成為學生願意主動表達心事的第一個窗口。
+3. 始終以「引導者」為主要角色，遵循「先安撫、再理解、後引導」的核心原則。
 
-【九大情境差異化回應策略】
-請先判斷對話屬於哪一種情境（situationCategory），並採取完全不同的說話方式：
-1. general_chat（一般聊天）：輕鬆親切、有好奇心，像朋友一樣聊生活瑣事（例如午餐、喜歡的遊戲、寵物、放學後的事）。
-2. happy_achievement（開心與成就感）：替孩子感到高興並肯定他的具體行動（例如「考一百分真的很厲害耶！是哪一科呀？」），保持輕快正向。
-3. peer_conflict（同學衝突）：先聽事情經過，中立不偏頗、不說教，問問當下發生了什麼事或他希望接下來怎麼樣。
-4. bullying（被霸凌）：嚴肅且溫暖地接住孩子，明確告訴他這不是他的錯，詢問現在是否安全、有沒有受傷，引導他告訴現場可信任的師長或家人。
-5. family_issue（家庭問題）：穩定傾聽孩子對家裡事情的感受，不批評家人也不強求孩子懂事，了解他現在的處境與需要誰幫忙。
-6. academic_stress（學習壓力）：不急著催他寫作業或考試加油，先聊聊卡住的地方是什麼、覺得哪裡最煩或最累。
-7. anger_frustration（生氣與挫折）：接納生氣很正常，不說教「不應該生氣」，幫他把惹毛他的具體事件講清楚。
+【二、彈性對話流程（不需在單次回覆完成所有步驟，請依當下情緒與進度自然調整）】
+1. 安撫情緒：優先理解並接住學生的感受，讓學生感受到被傾聽與理解。
+2. 了解事件：透過提問了解事情發生的起因及經過（若是開心或日常分享，也自然好奇地聊聊細節）。
+3. 引導反思：協助學生思考事件原因、自己的行為及他人的感受。
+4. 自主思考：鼓勵學生自己思考解決問題的方法，而非直接給予標準答案。
+5. 適時建議：當學生不知道如何處理問題時，提供具體且容易執行的建議。
+6. 正向鼓勵：肯定學生願意表達、思考及嘗試改善的行為。
+
+【三、對話風格】
+1. 使用繁體中文及符合臺灣國小學生程度的詞彙，避免艱深字眼。
+2. 語氣親切、自然、溫暖且具有耐心。
+3. 回覆簡短易懂（以 1～3 句為主），避免長篇大論。
+4. 每次優先提出一個問題，循序漸進地引導學生。
+5. 當學生無法清楚表達時，可提供 2～3 個簡單好選的選項協助表達。
+6. 避免過度說教、責備與批判。
+7. 避免重複使用制式安慰語句（如固定套用「我知道你很難過」、「給你一個大大的擁抱」、「你不是一個人」、「心心一直都在」或固定愛心／擁抱表情開場白），讓對話更貼近真人關懷；表情符號可有可無，偶爾自然用 0～1 個即可。
+8. 根據前面的對話脈絡回應，避免重複詢問學生已經回答過的問題；學生分享開心或日常趣事時，就自然陪伴聊天，不要強行把話題導向負面情緒。
+
+【四、行為規範與界線】
+1. 同理學生的情緒，但不代表認同學生的所有行為；不可一味肯定或迎合學生。
+2. 當學生出現錯誤觀念或不當行為時，應適時且溫和地指出問題，協助建立正確的是非觀念。
+3. 在不了解事件完整經過前，不可擅自判定誰對誰錯。
+4. 鼓勵學生換位思考，理解他人的立場與感受，培養自主思考與問題解決能力。
+5. 尊重學生的分享意願；若學生不想多說，不強迫學生回答問題。
+6. 適時提供簡單可行的情緒調節方法，例如深呼吸、休息一下、畫畫或找可信任的人談話。
+7. 鼓勵學生與現實生活中的老師、家長及朋友交流，適時主動尋求真人協助，避免過度依賴 AI。
+
+【五、核心培養目標】
+協助學生逐步培養：認識自己的情緒、勇於表達感受、理解事件原因、理解他人立場與感受、學習調節情緒、建立正確是非觀念、培養自主思考與問題解決能力，以及適時主動尋求真人協助。
+
+【六、情境分類與安全防護機制】
+請先判斷對話屬於哪一種情境（situationCategory），並依情境採取合適的引導方式：
+1. general_chat（一般聊天）：輕鬆親切、有好奇心，自然聊聊生活日常與興趣。
+2. happy_achievement（開心與成就感）：肯定孩子的具體努力與表達，自然詢問過程中印象最深刻的事。
+3. peer_conflict（同學衝突）：先安撫與了解經過，不預設立場或擅判對錯，再溫和引導換位思考與自己想怎麼處理。
+4. bullying（被霸凌）：先穩定與接住孩子，明確告訴他這不是他的錯，優先確認現在是否安全、有沒有受傷，並引導向現場可信任的老師或家人求助。
+5. family_issue（家庭問題）：穩定傾聽孩子對家裡事情的感受，不批評家人，了解他的處境與可以尋求哪位可信任大人協助。
+6. academic_stress（學習壓力）：先同理壓力與疲累，不急著說教催促，一起找出卡住的地方與可以嘗試的小步驟。
+7. anger_frustration（生氣與挫折）：同理生氣與挫折感（但不認同打人或破壞等行為），陪伴整理發生了什麼事，必要時邀請先做深呼吸或休息再思考下一步。
 8. violence_harm_others（暴力或傷害他人，例如打傷同學、拿東西丟人、想報復）：
-   - 絕對不可鼓勵、讚美或合理化傷害行為。
+   - 絕對不可鼓勵、讚美或合理化傷害行為，需溫和且明確地指出傷害他人是不對的。
    - 不要隨意推測或替他合理化心理狀態。
    - 第一時間先確認「現在有沒有人受傷、是否需要馬上處理或有人在場」。
-   - 明確引導他立刻告訴現場的大人、班導師或保健室/學務處協助處理。
+   - 明確引導他立刻告訴現場的大人、班導師或保健室／學務處協助處理。
 9. self_harm_emergency（自傷、不想活、家暴危機或其他立即危險）：
    - 第一時間確認孩子現在人是否安全、有沒有受傷或身旁有沒有大人。
-   - 語氣溫和而堅定，引導立即向身旁的老師、輔導老師、家長求助，或撥打 1925（安心專線）、113（保護專線）、110/119。
-   - 絕對不可說「我已經通知老師了」（除非系統後端確實完成通知；請留給系統介面顯示真實通報狀態）。
+   - 語氣溫和而堅定，引導立即向身旁的老師、輔導老師、家長求助，或撥打 1925（安心專線）、113（保護專線）、110／119。
+   - 絕對不可說「我已經通知老師了」（請留給系統介面顯示真實通報狀態）。
+
+【七、跨輪上下文記憶、情緒與風險延續原則（極重要）】
+1. 綜合脈絡判斷：你必須結合本對話 Session 的「歷史摘要、未解決事件、先前的學生與心心對話紀錄、以及最新這句話」進行綜合推理，絕對不可只針對最新一句話獨立反應。
+2. 連貫的情緒、情境與風險判斷：判斷 situationCategory、detectedEmotion 與 riskLevel 時，必須參考整段對話的脈絡，而非只看最後一句的字面詞彙。
+3. 高風險持續追蹤（不可輕易解除）：若前面對話曾出現高風險事件（如霸凌、暴力傷害他人、自傷或緊急危險），即使學生後續突然說「沒事了」、「開玩笑的」、「我現在很開心」或轉移到快樂話題，也絕對不可直接將風險解除為 none 或 low（previousHighRiskResolved 必須為 false），除非學生清楚具體地說明已有可信任的大人或老師實際介入處理且確認人員安全。回覆時要溫和而真誠地關心先前事件是否真的安全、是否有人幫忙。
+4. 關聯與矛盾優先提問釐清：當學生最新的訊息與前面的事件或情緒存在明顯關聯或矛盾時（例如前面剛說被欺負或很難過，下一句突然反過來誇讚或改口說超開心），應優先以溫和、不指責的提問釐清原因（「你剛剛才提到……，現在突然說……，心裡是不是還有點在意呢？」），不可直接順著表面語句盲目肯定或稱讚。
 
 【危機摘要要求】
-只有當 riskLevel 為 'elevated' 或 'critical' 時，才在 crisisSummaryForTeacher 欄位提供客觀簡短的事實描述給授權導師（不要臆測心理診斷）。一般安全對話請將 crisisSummaryForTeacher 設為空字串 ""。
+只有當 riskLevel 為 'elevated' 或 'critical' 時，才在 crisisSummaryForTeacher 欄位提供客觀簡短的事實描述給授權導師（包含先前未解決之風險追蹤，不要臆測心理診斷）。一般安全對話請將 crisisSummaryForTeacher 設為空字串 ""。
 `;
 
 const CHAT_RESPONSE_SCHEMA = {
   type: Type.OBJECT,
   properties: {
-    reply: {
+    contextAnalysis: {
       type: Type.STRING,
-      description: '給國小學生的自然回覆（1~3句繁體中文，不制式、不重複模板）',
+      description: '簡述如何結合歷史對話、未解決事件與最新訊息進行綜合判斷（1~2句，供內部評估用，不直接顯示給學生）',
+    },
+    hasContradictionOrFollowUp: {
+      type: Type.BOOLEAN,
+      description: '最新訊息是否與先前的事件或情緒存在明顯關聯、延續或矛盾需要釐清',
+    },
+    previousHighRiskResolved: {
+      type: Type.BOOLEAN,
+      description: '若先前無高風險事件則填 false；若先前曾有高風險事件，僅在學生明確具體說明已有師長/家長介入處理且人身安全無虞時才為 true（單純說沒事/開玩笑/轉移開心話題必須為 false）',
     },
     situationCategory: {
       type: Type.STRING,
@@ -737,44 +854,94 @@ const CHAT_RESPONSE_SCHEMA = {
         'violence_harm_others',
         'self_harm_emergency',
       ],
-      description: '依學生訊息與上下文判斷的情境分類',
+      description: '綜合歷史脈絡與最新訊息判斷的情境分類',
     },
     detectedEmotion: {
       type: Type.STRING,
       enum: ['happy', 'calm', 'anxious', 'sad', 'angry', 'tired'],
-      description: '模型從這則對話實際語氣分析出的情緒（不可直接複製簽到心情）',
+      description: '綜合歷史脈絡與最新對話語氣分析出的真實情緒（不可直接複製簽到心情，也不可被矛盾表面遮掩）',
     },
     riskLevel: {
       type: Type.STRING,
       enum: ['none', 'low', 'elevated', 'critical'],
-      description: '安全風險評估：一般或開心為 none，輕微困擾為 low，疑似霸凌/打傷人/嚴重衝突為 elevated，自傷或立即人身危險為 critical',
+      description: '綜合歷史與目前訊息的安全風險評估；若先前高風險事件尚未具體妥善處理，不可降回 none 或 low',
     },
     requiresImmediateSafetyCheck: {
       type: Type.BOOLEAN,
       description: '是否需優先確認人身安全與引導現場成人/緊急協助',
     },
+    sessionMemorySummary: {
+      type: Type.STRING,
+      description: '更新後的本 Session 簡潔對話記憶摘要（涵蓋核心事件經過、相關人物、情緒變化與待追蹤事項，200字以內）',
+    },
+    unresolvedEvents: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description: '目前尚未解決的重要事件或高風險追蹤事項清單（最多5項；若皆已處理則回傳空陣列）',
+    },
     crisisSummaryForTeacher: {
       type: Type.STRING,
       description: '僅在 elevated 或 critical 時填寫客觀事實摘要給授權導師，否則空字串',
     },
+    reply: {
+      type: Type.STRING,
+      description: '給國小學生的簡短引導回覆（1~3句繁體中文，自然延續前文、矛盾時優先提問釐清、高風險未解時持續關心確認安全）',
+    },
   },
   required: [
-    'reply',
+    'contextAnalysis',
+    'hasContradictionOrFollowUp',
+    'previousHighRiskResolved',
     'situationCategory',
     'detectedEmotion',
     'riskLevel',
     'requiresImmediateSafetyCheck',
+    'sessionMemorySummary',
+    'unresolvedEvents',
     'crisisSummaryForTeacher',
+    'reply',
+  ],
+  propertyOrdering: [
+    'contextAnalysis',
+    'hasContradictionOrFollowUp',
+    'previousHighRiskResolved',
+    'situationCategory',
+    'detectedEmotion',
+    'riskLevel',
+    'requiresImmediateSafetyCheck',
+    'sessionMemorySummary',
+    'unresolvedEvents',
+    'crisisSummaryForTeacher',
+    'reply',
   ],
 };
 
 interface ParsedGeminiChatOutput {
+  contextAnalysis: string;
+  hasContradictionOrFollowUp: boolean;
+  previousHighRiskResolved: boolean;
   reply: string;
   situationCategory: ChatSituationCategory;
   detectedEmotion: MoodType;
   riskLevel: RiskLevel;
   requiresImmediateSafetyCheck: boolean;
+  sessionMemorySummary: string;
+  unresolvedEvents: string[];
   crisisSummaryForTeacher: string;
+}
+
+export interface SessionHistoryTurn {
+  id?: string;
+  sessionId?: string;
+  studentId?: string;
+  sender: 'student' | 'ai';
+  text: string;
+  modelDetectedEmotion?: MoodType;
+  situationCategory?: ChatSituationCategory;
+  riskLevel?: RiskLevel;
+  aiStatus?: 'gemini' | 'error_notice' | 'safety_fallback';
+  createdAt?: string;
+  createdAtMs?: number;
 }
 
 const VALID_CATEGORIES = new Set<ChatSituationCategory>([
@@ -791,13 +958,122 @@ const VALID_CATEGORIES = new Set<ChatSituationCategory>([
 
 const VALID_EMOTIONS = new Set<MoodType>(['happy', 'calm', 'anxious', 'sad', 'angry', 'tired']);
 const VALID_RISKS = new Set<RiskLevel>(['none', 'low', 'elevated', 'critical']);
+const RISK_RANK: Record<RiskLevel, number> = { none: 0, low: 1, elevated: 2, critical: 3 };
+const HIGH_RISK_CATEGORIES = new Set<ChatSituationCategory>([
+  'bullying',
+  'violence_harm_others',
+  'self_harm_emergency',
+]);
+
+function maxRiskLevel(a: RiskLevel, b: RiskLevel): RiskLevel {
+  return RISK_RANK[a] >= RISK_RANK[b] ? a : b;
+}
+
+function isTurnHighRisk(turn: SessionHistoryTurn): boolean {
+  if (turn.riskLevel === 'elevated' || turn.riskLevel === 'critical') return true;
+  if (turn.aiStatus === 'safety_fallback') return true;
+  if (turn.situationCategory && HIGH_RISK_CATEGORIES.has(turn.situationCategory)) return true;
+  if (turn.sender === 'student' && matchesHighRiskKeywords(turn.text)) return true;
+  return false;
+}
+
+function buildCompactOlderDigest(olderMessages: SessionHistoryTurn[], existingSummary?: string): string {
+  const parts: string[] = [];
+  if (existingSummary && existingSummary.trim()) {
+    parts.push(`既有前情摘要：${existingSummary.trim()}`);
+  }
+  if (olderMessages.length > 0) {
+    const lines: string[] = [];
+    for (const m of olderMessages) {
+      const roleLabel = m.sender === 'student' ? '學生' : '心心';
+      const meta: string[] = [];
+      if (m.situationCategory) meta.push(m.situationCategory);
+      if (m.riskLevel && m.riskLevel !== 'none') meta.push(`風險:${m.riskLevel}`);
+      const metaSuffix = meta.length > 0 ? ` [${meta.join(', ')}]` : '';
+      lines.push(`${roleLabel}${metaSuffix}：${m.text.trim().slice(0, 140)}`);
+    }
+    const joined = lines.join('\n');
+    const trimmed =
+      joined.length > MAX_OLDER_DIGEST_CHARS
+        ? `…（較早訊息已濃縮）\n${joined.slice(-MAX_OLDER_DIGEST_CHARS)}`
+        : joined;
+    parts.push(`較早對話紀錄（已整理以控制 Token）：\n${trimmed}`);
+  }
+  return parts.join('\n\n');
+}
+
+function buildGeminiMultiTurnContents(params: {
+  recentMessages: SessionHistoryTurn[];
+  olderMessages: SessionHistoryTurn[];
+  latestUserTurnText: string;
+}): Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> {
+  const turns = [...params.recentMessages];
+
+  // Ensure multi-turn history starts cleanly with a 'user' turn if the slice landed on an AI turn
+  if (turns.length > 0 && turns[0].sender === 'ai' && params.olderMessages.length > 0) {
+    for (let i = params.olderMessages.length - 1; i >= 0; i -= 1) {
+      if (params.olderMessages[i].sender === 'student') {
+        turns.unshift(params.olderMessages[i]);
+        break;
+      }
+    }
+  }
+
+  const normalized: Array<{ role: 'user' | 'model'; text: string }> = [];
+  for (const item of turns) {
+    if (!item || typeof item.text !== 'string' || !item.text.trim()) continue;
+    const role: 'user' | 'model' = item.sender === 'student' ? 'user' : 'model';
+    const maxLen = role === 'user' ? MAX_MESSAGE_LENGTH : 1200;
+    const text = item.text.trim().slice(0, maxLen);
+
+    if (normalized.length === 0 && role === 'model') {
+      normalized.push({ role: 'user', text: '（接續先前與心心的對話）' });
+    }
+
+    const prev = normalized[normalized.length - 1];
+    if (prev && prev.role === role) {
+      prev.text = `${prev.text}\n${text}`;
+    } else {
+      normalized.push({ role, text });
+    }
+  }
+
+  const prev = normalized[normalized.length - 1];
+  if (prev && prev.role === 'user') {
+    prev.text = `${prev.text}\n\n[最新訊息] ${params.latestUserTurnText}`;
+  } else {
+    normalized.push({ role: 'user', text: params.latestUserTurnText });
+  }
+
+  return normalized.map((n) => ({
+    role: n.role,
+    parts: [{ text: n.text }],
+  }));
+}
 
 export async function generateXinxinReply(params: {
+  sessionId: string;
   message: string;
   selfReportedMood?: MoodType;
-  history?: Array<{ sender: 'student' | 'ai'; text: string }>;
+  priorMessages: SessionHistoryTurn[];
+  rollingSummary?: string;
+  summarizedUpToMs?: number;
+  priorHighestRisk?: RiskLevel;
+  priorHighRiskUnresolved?: boolean;
+  priorUnresolvedEvents?: string[];
+  openAlerts?: Array<{
+    id?: string;
+    situationCategory?: string;
+    severity?: string;
+    triggerExcerpt?: string;
+    aiSummary?: string;
+    status?: string;
+    createdAt?: string;
+  }>;
 }): Promise<{
   output: ParsedGeminiChatOutput;
+  enforcedUnresolvedHighRisk: boolean;
+  sessionHighestRisk: RiskLevel;
   modelUsed: string;
   promptTokens: number;
   outputTokens: number;
@@ -808,33 +1084,116 @@ export async function generateXinxinReply(params: {
   }
 
   const trimmedMessage = params.message.trim().slice(0, MAX_MESSAGE_LENGTH);
-  const rawHistory = Array.isArray(params.history) ? params.history.slice(-MAX_HISTORY_TURNS) : [];
+  const allPrior = [...params.priorMessages];
 
-  // Deduplicate if the caller accidentally appended the current message at the end of history
-  const cleanHistory = [...rawHistory];
+  // Deduplicate if the current student turn was already stored in Firestore milliseconds before this call
   if (
-    cleanHistory.length > 0 &&
-    cleanHistory[cleanHistory.length - 1].sender === 'student' &&
-    cleanHistory[cleanHistory.length - 1].text.trim() === trimmedMessage
+    allPrior.length > 0 &&
+    allPrior[allPrior.length - 1].sender === 'student' &&
+    allPrior[allPrior.length - 1].text.trim() === trimmedMessage
   ) {
-    cleanHistory.pop();
+    allPrior.pop();
   }
 
-  const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
-  for (const item of cleanHistory) {
-    if (!item || typeof item.text !== 'string' || !item.text.trim()) continue;
-    contents.push({
-      role: item.sender === 'student' ? 'user' : 'model',
-      parts: [{ text: item.text.trim().slice(0, MAX_MESSAGE_LENGTH) }],
-    });
+  const olderMessages =
+    allPrior.length > RECENT_VERBATIM_MESSAGES
+      ? allPrior.slice(0, allPrior.length - RECENT_VERBATIM_MESSAGES)
+      : [];
+  const recentMessages = allPrior.slice(-RECENT_VERBATIM_MESSAGES);
+
+  // Preserve ALL high-risk / critical events across the entire session (even if outside RECENT_VERBATIM_MESSAGES)
+  const highRiskTurns = allPrior.filter(isTurnHighRisk);
+  let computedPriorHighest: RiskLevel = params.priorHighestRisk || 'none';
+  let latestHighRiskCategory: ChatSituationCategory | undefined;
+  for (const t of allPrior) {
+    if (t.riskLevel && VALID_RISKS.has(t.riskLevel)) {
+      computedPriorHighest = maxRiskLevel(computedPriorHighest, t.riskLevel);
+    } else if (isTurnHighRisk(t)) {
+      computedPriorHighest = maxRiskLevel(computedPriorHighest, 'elevated');
+    }
+    if (t.situationCategory && HIGH_RISK_CATEGORIES.has(t.situationCategory)) {
+      latestHighRiskCategory = t.situationCategory;
+    }
+  }
+  for (const alert of params.openAlerts || []) {
+    if (alert.severity === 'critical') {
+      computedPriorHighest = maxRiskLevel(computedPriorHighest, 'critical');
+    } else if (alert.severity === 'elevated') {
+      computedPriorHighest = maxRiskLevel(computedPriorHighest, 'elevated');
+    }
+    if (alert.situationCategory && HIGH_RISK_CATEGORIES.has(alert.situationCategory as ChatSituationCategory)) {
+      latestHighRiskCategory = alert.situationCategory as ChatSituationCategory;
+    }
   }
 
-  const moodContext = params.selfReportedMood
-    ? `（參考背景：學生今日心情簽到自評為「${params.selfReportedMood}」，但請務必以學生這句話的實際內容與語氣為主，不要強套負面情緒）\n`
-    : '';
-  contents.push({
-    role: 'user',
-    parts: [{ text: `${moodContext}學生說：「${trimmedMessage}」` }],
+  const hasOpenAlert = (params.openAlerts || []).some((a) => a.status !== 'resolved');
+  const priorHighRiskActive =
+    hasOpenAlert ||
+    ((computedPriorHighest === 'elevated' || computedPriorHighest === 'critical') &&
+      params.priorHighRiskUnresolved !== false);
+
+  // Build concise older digest (only unsummarized older messages + existing rollingSummary)
+  const unsummarizedOlder = params.summarizedUpToMs
+    ? olderMessages.filter((m) => (m.createdAtMs || 0) > params.summarizedUpToMs!)
+    : olderMessages;
+  const olderDigest = buildCompactOlderDigest(unsummarizedOlder, params.rollingSummary);
+
+  const dynamicContextLines: string[] = [
+    `\n【本次對話 Session 上下文與風險記憶（Session ID: ${params.sessionId}）】`,
+    `- 本 Session 累計對話輪數（不含本句）：${allPrior.length} 則訊息`,
+  ];
+
+  if (olderDigest) {
+    dynamicContextLines.push(`- 較早歷史摘要：\n${olderDigest}`);
+  }
+  if (params.priorUnresolvedEvents && params.priorUnresolvedEvents.length > 0) {
+    dynamicContextLines.push(
+      `- 尚未解決的重要事件清單：\n  • ${params.priorUnresolvedEvents.join('\n  • ')}`
+    );
+  }
+  if (priorHighRiskActive || highRiskTurns.length > 0 || hasOpenAlert) {
+    const pinnedExcerpts = highRiskTurns
+      .slice(-5)
+      .map(
+        (t) =>
+          `  • [${t.createdAt || '先前'}][風險:${t.riskLevel || 'elevated'}${t.situationCategory ? `/${t.situationCategory}` : ''}] ${t.sender === 'student' ? '學生' : '系統/心心'}：「${t.text.trim().slice(0, 180)}」`
+      )
+      .join('\n');
+    const alertExcerpts = (params.openAlerts || [])
+      .slice(-3)
+      .map(
+        (a) =>
+          `  • [教師預警:${a.status || 'open'}/${a.severity || 'elevated'}] ${a.situationCategory || ''}：${String(a.triggerExcerpt || a.aiSummary || '').slice(0, 160)}`
+      )
+      .join('\n');
+
+    dynamicContextLines.push(
+      `- ⚠️ 高風險延續追蹤狀態：${priorHighRiskActive ? `【尚未確認妥善處理！歷史最高風險：${computedPriorHighest}】` : `歷史曾達 ${computedPriorHighest}`}`
+    );
+    if (pinnedExcerpts) {
+      dynamicContextLines.push(`- 關鍵高風險對話原文（不可遺失）：\n${pinnedExcerpts}`);
+    }
+    if (alertExcerpts) {
+      dynamicContextLines.push(`- 未結案安全通報：\n${alertExcerpts}`);
+    }
+    if (priorHighRiskActive) {
+      dynamicContextLines.push(
+        `- 強制安全規範：因為先前提及的高風險事件尚未確認妥善處理，即使學生最新這句話表面開心或說「沒事了／開玩笑的」，riskLevel 仍不可降回 none 或 low，且不可只給予盲目肯定，必須溫和追蹤確認安全與是否有大人協助。`
+      );
+    }
+  }
+  if (params.selfReportedMood) {
+    dynamicContextLines.push(
+      `- 今日心情簽到自評（僅作背景參考，不可覆蓋對話實際情緒與風險）：${params.selfReportedMood}`
+    );
+  }
+
+  const fullSystemInstruction = `${XINXIN_SYSTEM_INSTRUCTION}\n${dynamicContextLines.join('\n')}`;
+
+  const contents = buildGeminiMultiTurnContents({
+    recentMessages,
+    olderMessages,
+    latestUserTurnText: trimmedMessage,
   });
 
   const primaryModel = getConfiguredGeminiModel();
@@ -854,7 +1213,7 @@ export async function generateXinxinReply(params: {
         model: candidate,
         contents,
         config: {
-          systemInstruction: XINXIN_SYSTEM_INSTRUCTION,
+          systemInstruction: fullSystemInstruction,
           responseMimeType: 'application/json',
           responseSchema: CHAT_RESPONSE_SCHEMA,
           thinkingConfig: {
@@ -908,29 +1267,85 @@ export async function generateXinxinReply(params: {
     throw new Error('MISSING_REPLY_IN_GEMINI_RESPONSE');
   }
 
-  const situationCategory = VALID_CATEGORIES.has(parsed.situationCategory as ChatSituationCategory)
+  let situationCategory = VALID_CATEGORIES.has(parsed.situationCategory as ChatSituationCategory)
     ? (parsed.situationCategory as ChatSituationCategory)
     : 'general_chat';
   const detectedEmotion = VALID_EMOTIONS.has(parsed.detectedEmotion as MoodType)
     ? (parsed.detectedEmotion as MoodType)
     : 'calm';
-  const riskLevel = VALID_RISKS.has(parsed.riskLevel as RiskLevel)
+  const parsedRisk = VALID_RISKS.has(parsed.riskLevel as RiskLevel)
     ? (parsed.riskLevel as RiskLevel)
     : 'none';
 
   // Enforce safety invariant: violence_harm_others / self_harm_emergency / bullying must never stay riskLevel 'none'
-  const enforcedRisk: RiskLevel =
+  let enforcedRisk: RiskLevel =
     situationCategory === 'self_harm_emergency'
       ? 'critical'
-      : situationCategory === 'violence_harm_others' && riskLevel === 'none'
+      : situationCategory === 'violence_harm_others' && parsedRisk === 'none'
       ? 'elevated'
-      : situationCategory === 'bullying' && riskLevel === 'none'
+      : situationCategory === 'bullying' && parsedRisk === 'none'
       ? 'elevated'
-      : riskLevel;
+      : parsedRisk;
+
+  // Enforce Requirement 4: prior unresolved high-risk CANNOT be cleared just because student shifts to positive/happy words
+  const modelClaimedResolved = Boolean(parsed.previousHighRiskResolved);
+  const keepPriorHighRisk =
+    priorHighRiskActive && (hasOpenAlert || !modelClaimedResolved);
+
+  let enforcedUnresolvedHighRisk = false;
+  if (keepPriorHighRisk) {
+    enforcedRisk = maxRiskLevel(enforcedRisk, computedPriorHighest === 'critical' ? 'critical' : 'elevated');
+    enforcedUnresolvedHighRisk = true;
+    if (
+      latestHighRiskCategory &&
+      (situationCategory === 'happy_achievement' || situationCategory === 'general_chat')
+    ) {
+      situationCategory = latestHighRiskCategory;
+    }
+  } else if (enforcedRisk === 'elevated' || enforcedRisk === 'critical') {
+    enforcedUnresolvedHighRisk = true;
+  }
+
+  const parsedUnresolvedEvents = Array.isArray(parsed.unresolvedEvents)
+    ? parsed.unresolvedEvents
+        .filter((e): e is string => typeof e === 'string' && Boolean(e.trim()))
+        .map((e) => e.trim().slice(0, 160))
+        .slice(0, 5)
+    : [];
+
+  const finalUnresolvedEvents =
+    parsedUnresolvedEvents.length > 0
+      ? parsedUnresolvedEvents
+      : enforcedUnresolvedHighRisk && params.priorUnresolvedEvents && params.priorUnresolvedEvents.length > 0
+      ? params.priorUnresolvedEvents.slice(0, 5)
+      : enforcedUnresolvedHighRisk && highRiskTurns.length > 0
+      ? [`高風險事件尚未確認妥善處理：${highRiskTurns[highRiskTurns.length - 1].text.trim().slice(0, 80)}`]
+      : [];
+
+  let crisisSummaryForTeacher =
+    typeof parsed.crisisSummaryForTeacher === 'string'
+      ? parsed.crisisSummaryForTeacher.trim().slice(0, 800)
+      : '';
+  if ((enforcedRisk === 'elevated' || enforcedRisk === 'critical') && !crisisSummaryForTeacher) {
+    crisisSummaryForTeacher = enforcedUnresolvedHighRisk && keepPriorHighRisk
+      ? `本對話 Session 先前曾出現高風險事件且尚未確認妥善處理，學生最新回覆雖語氣轉變（${trimmedMessage.slice(0, 80)}），仍建議導師持續關心確認安全。`
+      : `AI 安全機制偵測到「${situationCategory}」風險，請導師儘速關心確認學生現況。`;
+  }
+
+  const sessionMemorySummary =
+    typeof parsed.sessionMemorySummary === 'string' && parsed.sessionMemorySummary.trim()
+      ? parsed.sessionMemorySummary.trim().slice(0, 1800)
+      : params.rollingSummary || '';
+
+  const sessionHighestRisk = maxRiskLevel(computedPriorHighest, enforcedRisk);
 
   const usage = response.usageMetadata;
   return {
     output: {
+      contextAnalysis:
+        typeof parsed.contextAnalysis === 'string' ? parsed.contextAnalysis.trim().slice(0, 400) : '',
+      hasContradictionOrFollowUp: Boolean(parsed.hasContradictionOrFollowUp),
+      previousHighRiskResolved: modelClaimedResolved && !keepPriorHighRisk,
       reply,
       situationCategory,
       detectedEmotion,
@@ -939,11 +1354,12 @@ export async function generateXinxinReply(params: {
         Boolean(parsed.requiresImmediateSafetyCheck) ||
         enforcedRisk === 'elevated' ||
         enforcedRisk === 'critical',
-      crisisSummaryForTeacher:
-        typeof parsed.crisisSummaryForTeacher === 'string'
-          ? parsed.crisisSummaryForTeacher.slice(0, 800)
-          : '',
+      sessionMemorySummary,
+      unresolvedEvents: finalUnresolvedEvents,
+      crisisSummaryForTeacher,
     },
+    enforcedUnresolvedHighRisk,
+    sessionHighestRisk,
     modelUsed,
     promptTokens: usage?.promptTokenCount || 0,
     outputTokens: usage?.candidatesTokenCount || 0,
@@ -1017,13 +1433,13 @@ export function createApp() {
     });
   });
 
-  // Main Gemini Chat Endpoint (Verified Firebase Auth + Rate Limiting + Quota + Real Crisis Escalation)
+  // Main Gemini Chat Endpoint (Verified Firebase Auth + Session Isolation + Firestore History Recovery + Risk Continuity)
   app.post('/api/gemini/chat', requireAuth, async (req: AuthedRequest, res: Response) => {
     rolloverMetricsIfNeeded();
     const authUser = req.authUser!;
     const callerProfile = req.callerProfile;
 
-    const { message, mood, history = [] } = req.body || {};
+    const { message, mood, sessionId: rawSessionId, history = [] } = req.body || {};
 
     if (!message || typeof message !== 'string' || !message.trim()) {
       res.status(400).json({ error: '訊息內容不可為空', errorCode: 'EMPTY_MESSAGE' });
@@ -1079,29 +1495,166 @@ export function createApp() {
     usageMetrics.totalRequestsToday += 1;
 
     try {
+      const legacySessionId = `legacy-${authUser.uid}`;
+      const activeSessionId =
+        typeof rawSessionId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(rawSessionId.trim())
+          ? rawSessionId.trim()
+          : legacySessionId;
+
+      // Load persisted student session state, messages, and crisis alerts directly from Firestore
+      const [sessionRes, messagesRes, alertsRes] = await Promise.allSettled([
+        firestoreRestGet(`chat_sessions/${encodeURIComponent(activeSessionId)}`, authUser.token),
+        firestoreRestQueryByField('chat_messages', 'studentId', authUser.uid, authUser.token),
+        firestoreRestQueryByField('crisis_alerts', 'studentId', authUser.uid, authUser.token),
+      ]);
+
+      const rawSessionDoc = sessionRes.status === 'fulfilled' ? sessionRes.value : null;
+      const sessionDoc =
+        rawSessionDoc && rawSessionDoc.studentId === authUser.uid ? rawSessionDoc : null;
+
+      const firestoreMessages = (messagesRes.status === 'fulfilled' ? messagesRes.value : [])
+        .filter((m) => {
+          if (m.studentId !== authUser.uid) return false;
+          const msgSession = typeof m.sessionId === 'string' && m.sessionId ? m.sessionId : legacySessionId;
+          return msgSession === activeSessionId;
+        })
+        .filter((m) => m.aiStatus !== 'error_notice')
+        .map(
+          (m): SessionHistoryTurn => ({
+            id: typeof m.id === 'string' ? m.id : undefined,
+            sessionId: typeof m.sessionId === 'string' ? m.sessionId : activeSessionId,
+            studentId: authUser.uid,
+            sender: m.sender === 'ai' ? 'ai' : 'student',
+            text: String(m.text || ''),
+            modelDetectedEmotion: VALID_EMOTIONS.has(m.modelDetectedEmotion)
+              ? m.modelDetectedEmotion
+              : undefined,
+            situationCategory: VALID_CATEGORIES.has(m.situationCategory)
+              ? m.situationCategory
+              : undefined,
+            riskLevel: VALID_RISKS.has(m.riskLevel) ? m.riskLevel : undefined,
+            aiStatus: m.aiStatus,
+            createdAt: typeof m.createdAt === 'string' ? m.createdAt : undefined,
+            createdAtMs: typeof m.createdAtMs === 'number' ? m.createdAtMs : 0,
+          })
+        );
+
+      // Merge any latency-compensated client history belonging strictly to this student & session
+      const seenIds = new Set(firestoreMessages.map((m) => m.id).filter(Boolean) as string[]);
+      const seenSignatures = new Set(
+        firestoreMessages.map((m) => `${m.sender}|${m.createdAtMs || 0}|${m.text.trim()}`)
+      );
+
+      const clientHistory = Array.isArray(history) ? history : [];
+      for (const raw of clientHistory) {
+        if (!raw || typeof raw.text !== 'string' || !raw.text.trim()) continue;
+        if (raw.studentId && raw.studentId !== authUser.uid) continue;
+        const itemSession =
+          typeof raw.sessionId === 'string' && raw.sessionId ? raw.sessionId : activeSessionId;
+        if (itemSession !== activeSessionId) continue;
+        if (raw.aiStatus === 'error_notice') continue;
+
+        const id = typeof raw.id === 'string' ? raw.id : undefined;
+        const createdAtMs = typeof raw.createdAtMs === 'number' ? raw.createdAtMs : 0;
+        const sender: 'student' | 'ai' = raw.sender === 'ai' ? 'ai' : 'student';
+        const sig = `${sender}|${createdAtMs}|${raw.text.trim()}`;
+        if ((id && seenIds.has(id)) || seenSignatures.has(sig)) continue;
+        if (id) seenIds.add(id);
+        seenSignatures.add(sig);
+
+        firestoreMessages.push({
+          id,
+          sessionId: activeSessionId,
+          studentId: authUser.uid,
+          sender,
+          text: raw.text.trim(),
+          modelDetectedEmotion: VALID_EMOTIONS.has(raw.modelDetectedEmotion)
+            ? raw.modelDetectedEmotion
+            : undefined,
+          situationCategory: VALID_CATEGORIES.has(raw.situationCategory)
+            ? raw.situationCategory
+            : undefined,
+          riskLevel: VALID_RISKS.has(raw.riskLevel) ? raw.riskLevel : undefined,
+          aiStatus: raw.aiStatus,
+          createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : undefined,
+          createdAtMs,
+        });
+      }
+
+      firestoreMessages.sort(
+        (a, b) =>
+          (a.createdAtMs || 0) - (b.createdAtMs || 0) ||
+          (a.createdAt || '').localeCompare(b.createdAt || '')
+      );
+
+      const studentAlerts = (alertsRes.status === 'fulfilled' ? alertsRes.value : []).filter(
+        (a) =>
+          a.studentId === authUser.uid &&
+          (!a.sessionId || a.sessionId === activeSessionId)
+      );
+      const openSessionAlerts = studentAlerts.filter((a) => a.status !== 'resolved');
+
       const selfReportedMood = VALID_EMOTIONS.has(mood as MoodType) ? (mood as MoodType) : undefined;
-      const { output, modelUsed, promptTokens, outputTokens } = await generateXinxinReply({
+      const {
+        output,
+        enforcedUnresolvedHighRisk,
+        sessionHighestRisk,
+        modelUsed,
+        promptTokens,
+        outputTokens,
+      } = await generateXinxinReply({
+        sessionId: activeSessionId,
         message,
         selfReportedMood,
-        history: Array.isArray(history) ? history : [],
+        priorMessages: firestoreMessages,
+        rollingSummary:
+          typeof sessionDoc?.rollingSummary === 'string' ? sessionDoc.rollingSummary : undefined,
+        summarizedUpToMs:
+          typeof sessionDoc?.summarizedUpToMs === 'number' ? sessionDoc.summarizedUpToMs : undefined,
+        priorHighestRisk: VALID_RISKS.has(sessionDoc?.highestRiskLevel)
+          ? (sessionDoc!.highestRiskLevel as RiskLevel)
+          : undefined,
+        priorHighRiskUnresolved:
+          typeof sessionDoc?.unresolvedHighRisk === 'boolean'
+            ? sessionDoc.unresolvedHighRisk
+            : undefined,
+        priorUnresolvedEvents: Array.isArray(sessionDoc?.unresolvedEvents)
+          ? sessionDoc!.unresolvedEvents.filter((e: any) => typeof e === 'string')
+          : undefined,
+        openAlerts: openSessionAlerts,
       });
 
       usageMetrics.successfulRequestsToday += 1;
       usageMetrics.totalPromptTokensToday += promptTokens;
       usageMetrics.totalOutputTokensToday += outputTokens;
 
-      // Real crisis alert persistence when elevated or critical risk is detected
+      // Real crisis alert persistence when elevated or critical risk is detected (avoid duplicating identical open alerts)
       let crisisAlertId: string | null = null;
       let teacherNotified = false;
 
       if (output.riskLevel === 'elevated' || output.riskLevel === 'critical') {
         const classId = callerProfile?.classId || '';
         const studentName = callerProfile?.name || authUser.name || '學生';
-        if (classId) {
+        const existingOpenAlert = openSessionAlerts.find(
+          (a) => a.sessionId === activeSessionId || !a.sessionId
+        );
+        const escalatedToCritical =
+          output.riskLevel === 'critical' &&
+          existingOpenAlert &&
+          existingOpenAlert.severity !== 'critical';
+        const exactSameExcerpt =
+          existingOpenAlert &&
+          String(existingOpenAlert.triggerExcerpt || '').trim() === message.trim().slice(0, 500);
+
+        if (existingOpenAlert && !escalatedToCritical && (!output.hasContradictionOrFollowUp || exactSameExcerpt)) {
+          crisisAlertId = String(existingOpenAlert.id || '');
+          teacherNotified = true;
+        } else if (classId) {
           const alertId = `alert-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           const nowMs = Date.now();
           const alertPayload = {
             id: alertId,
+            sessionId: activeSessionId,
             studentId: authUser.uid,
             studentName,
             classId,
@@ -1126,17 +1679,61 @@ export function createApp() {
           if (created) {
             crisisAlertId = alertId;
             teacherNotified = true;
+          } else if (existingOpenAlert) {
+            crisisAlertId = String(existingOpenAlert.id || '');
+            teacherNotified = true;
           }
         }
       }
 
+      // Persist updated rolling session memory in Firestore (best effort on Spark tier)
+      const nowMs = Date.now();
+      const nowStr = getTaiwanDateTimeString();
+      const summarizedBoundaryMs =
+        firestoreMessages.length > RECENT_VERBATIM_MESSAGES
+          ? firestoreMessages[firestoreMessages.length - RECENT_VERBATIM_MESSAGES - 1]?.createdAtMs ||
+            nowMs
+          : sessionDoc?.summarizedUpToMs || 0;
+      if (callerProfile?.classId) {
+        const updatedSessionPayload = {
+          id: activeSessionId,
+          studentId: authUser.uid,
+          studentName: callerProfile?.name || authUser.name || '學生',
+          classId: callerProfile.classId,
+          title:
+            (typeof sessionDoc?.title === 'string' && sessionDoc.title.trim()) ||
+            message.trim().slice(0, 24) ||
+            '與心心的對話',
+          rollingSummary: output.sessionMemorySummary.slice(0, 1800),
+          summarizedUpToMs: summarizedBoundaryMs,
+          highestRiskLevel: sessionHighestRisk,
+          unresolvedHighRisk: enforcedUnresolvedHighRisk,
+          unresolvedEvents: output.unresolvedEvents.slice(0, 5),
+          lastEmotion: output.detectedEmotion,
+          lastSituationCategory: output.situationCategory,
+          messageCount: firestoreMessages.length + 2,
+          createdAt: typeof sessionDoc?.createdAt === 'string' ? sessionDoc.createdAt : nowStr,
+          updatedAt: nowStr,
+          createdAtMs: typeof sessionDoc?.createdAtMs === 'number' ? sessionDoc.createdAtMs : nowMs,
+          updatedAtMs: nowMs,
+        };
+        await firestoreRestSetDoc('chat_sessions', activeSessionId, updatedSessionPayload, authUser.token);
+      }
+
       res.json({
+        sessionId: activeSessionId,
         reply: output.reply,
         model: modelUsed,
         selfReportedMood: selfReportedMood || null,
         modelDetectedEmotion: output.detectedEmotion,
         situationCategory: output.situationCategory,
         riskLevel: output.riskLevel,
+        hasContradictionOrFollowUp: output.hasContradictionOrFollowUp,
+        unresolvedHighRisk: enforcedUnresolvedHighRisk,
+        sessionHighestRisk,
+        sessionMemorySummary: output.sessionMemorySummary,
+        unresolvedEvents: output.unresolvedEvents,
+        summarizedUpToMs: summarizedBoundaryMs,
         requiresImmediateSafetyCheck: output.requiresImmediateSafetyCheck,
         crisisSummaryForTeacher: output.crisisSummaryForTeacher,
         crisisAlertId,
