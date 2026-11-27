@@ -1,9 +1,8 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { initializeApp, cert, applicationDefault, getApps, App } from 'firebase-admin/app';
-import { getAuth, UpdateRequest } from 'firebase-admin/auth';
-import { getFirestore } from 'firebase-admin/firestore';
+import type { App } from 'firebase-admin/app';
+import type { UpdateRequest } from 'firebase-admin/auth';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
@@ -58,42 +57,76 @@ function loadFirebaseConfig(): FirebaseClientConfig {
 
 const fbConfig = loadFirebaseConfig();
 
-// Optional Firebase Admin SDK initialization (enabled when service account JSON or ADC is provided)
+// Optional Firebase Admin SDK lazy initialization (only loaded when service account JSON or ADC is provided)
+// Lazy dynamic import prevents jwks-rsa -> require('jose') from crashing CJS/ESM loading on older Node runtimes
 let adminApp: App | null = null;
 let adminSdkReady = false;
+let adminInitPromise: Promise<{
+  app: App;
+  getAuth: typeof import('firebase-admin/auth').getAuth;
+  getFirestore: typeof import('firebase-admin/firestore').getFirestore;
+} | null> | null = null;
 
-function initFirebaseAdmin() {
-  if (adminApp) return;
-  try {
-    const existing = getApps();
-    if (existing.length > 0) {
-      adminApp = existing[0];
-      adminSdkReady = true;
-      return;
-    }
-    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-      adminApp = initializeApp({
-        credential: cert(serviceAccount),
-        projectId: fbConfig.projectId || serviceAccount.project_id,
-      });
-      adminSdkReady = true;
-      console.log('Firebase Admin SDK initialized via FIREBASE_SERVICE_ACCOUNT_JSON.');
-    } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-      adminApp = initializeApp({
-        credential: applicationDefault(),
-        projectId: fbConfig.projectId,
-      });
-      adminSdkReady = true;
-      console.log('Firebase Admin SDK initialized via GOOGLE_APPLICATION_CREDENTIALS.');
-    }
-  } catch (err) {
-    console.warn('Firebase Admin SDK initialization skipped or failed:', err);
-    adminApp = null;
-    adminSdkReady = false;
-  }
+function hasAdminSdkCredentialsConfigured(): boolean {
+  const sa = (process.env.FIREBASE_SERVICE_ACCOUNT_JSON || '').trim();
+  const gac = (process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
+  return Boolean(sa || gac);
 }
-initFirebaseAdmin();
+
+async function getFirebaseAdminContext() {
+  if (!hasAdminSdkCredentialsConfigured()) {
+    return null;
+  }
+  if (adminInitPromise) {
+    return adminInitPromise;
+  }
+
+  adminInitPromise = (async () => {
+    try {
+      const [appMod, authMod, firestoreMod] = await Promise.all([
+        import('firebase-admin/app'),
+        import('firebase-admin/auth'),
+        import('firebase-admin/firestore'),
+      ]);
+
+      const existing = appMod.getApps();
+      if (existing.length > 0) {
+        adminApp = existing[0];
+        adminSdkReady = true;
+      } else if ((process.env.FIREBASE_SERVICE_ACCOUNT_JSON || '').trim()) {
+        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON!.trim());
+        adminApp = appMod.initializeApp({
+          credential: appMod.cert(serviceAccount),
+          projectId: fbConfig.projectId || serviceAccount.project_id,
+        });
+        adminSdkReady = true;
+        console.log('Firebase Admin SDK initialized via FIREBASE_SERVICE_ACCOUNT_JSON.');
+      } else if ((process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim()) {
+        adminApp = appMod.initializeApp({
+          credential: appMod.applicationDefault(),
+          projectId: fbConfig.projectId,
+        });
+        adminSdkReady = true;
+        console.log('Firebase Admin SDK initialized via GOOGLE_APPLICATION_CREDENTIALS.');
+      }
+
+      if (!adminApp) return null;
+      return {
+        app: adminApp,
+        getAuth: authMod.getAuth,
+        getFirestore: firestoreMod.getFirestore,
+      };
+    } catch (err) {
+      console.warn('Firebase Admin SDK lazy initialization skipped or failed:', err);
+      adminApp = null;
+      adminSdkReady = false;
+      adminInitPromise = null;
+      return null;
+    }
+  })();
+
+  return adminInitPromise;
+}
 
 // Initialize Gemini API client dynamically on the server side ONLY
 const DEPRECATED_GEMINI_MODELS = new Set([
@@ -465,15 +498,18 @@ async function firestoreRestCreateDoc(
 }
 
 async function getCallerProfile(authUser: AuthenticatedUser) {
-  if (adminSdkReady && adminApp) {
+  if (hasAdminSdkCredentialsConfigured()) {
     try {
-      const adminDb =
-        fbConfig.firestoreDatabaseId && fbConfig.firestoreDatabaseId !== '(default)'
-          ? getFirestore(adminApp, fbConfig.firestoreDatabaseId)
-          : getFirestore(adminApp);
-      const snap = await adminDb.doc(`users/${authUser.uid}`).get();
-      if (snap.exists) {
-        return snap.data() as AuthedRequest['callerProfile'];
+      const ctx = await getFirebaseAdminContext();
+      if (ctx) {
+        const adminDb =
+          fbConfig.firestoreDatabaseId && fbConfig.firestoreDatabaseId !== '(default)'
+            ? ctx.getFirestore(ctx.app, fbConfig.firestoreDatabaseId)
+            : ctx.getFirestore(ctx.app);
+        const snap = await adminDb.doc(`users/${authUser.uid}`).get();
+        if (snap.exists) {
+          return snap.data() as AuthedRequest['callerProfile'];
+        }
       }
     } catch {
       // Fallback to REST with caller token
@@ -952,7 +988,8 @@ export function createApp() {
       hasGeminiKey: Boolean(getGeminiApiKey()),
       firebaseProjectConfigured: Boolean(fbConfig.projectId),
       firestoreDatabaseConfigured: Boolean(fbConfig.firestoreDatabaseId),
-      adminSdkReady,
+      adminSdkReady: adminSdkReady || hasAdminSdkCredentialsConfigured(),
+      nodeVersion: process.version,
       lastGeminiError: lastGeminiDiagnostic,
       timestamp: new Date().toISOString(),
     });
@@ -976,7 +1013,7 @@ export function createApp() {
       isAdmin,
       envBootstrap,
       bootstrapClaimed: bootstrapDocExists,
-      adminSdkReady,
+      adminSdkReady: adminSdkReady || hasAdminSdkCredentialsConfigured(),
     });
   });
 
@@ -1311,7 +1348,7 @@ export function createApp() {
       totalOutputTokensToday: usageMetrics.totalOutputTokensToday,
       dailyLimitPerUser: DAILY_LIMIT_PER_USER,
       minuteLimitPerUser: MINUTE_LIMIT_PER_USER,
-      adminSdkReady,
+      adminSdkReady: adminSdkReady || hasAdminSdkCredentialsConfigured(),
       geminiKeyConfigured: Boolean(getGeminiApiKey()),
       activeUsersToday: userUsageMap.size,
       lastGeminiError: lastGeminiDiagnostic,
@@ -1327,7 +1364,8 @@ export function createApp() {
       return;
     }
 
-    if (!adminSdkReady || !adminApp) {
+    const adminCtx = await getFirebaseAdminContext();
+    if (!adminCtx) {
       res.status(501).json({
         errorCode: 'ADMIN_SDK_UNCONFIGURED',
         authSynced: false,
@@ -1338,7 +1376,7 @@ export function createApp() {
     }
 
     try {
-      const adminAuth = getAuth(adminApp);
+      const adminAuth = adminCtx.getAuth(adminCtx.app);
       const hasPassword = typeof password === 'string' && password.trim().length >= 6;
       if (typeof password === 'string' && password.trim().length > 0 && password.trim().length < 6) {
         res.status(400).json({ error: '初始密碼長度至少需 6 個字元。' });
@@ -1416,7 +1454,8 @@ export function createApp() {
     const uid = String(req.params.uid || '');
     const { name, email, role, classId, status, newPassword } = req.body || {};
 
-    if (!adminSdkReady || !adminApp) {
+    const adminCtx = await getFirebaseAdminContext();
+    if (!adminCtx) {
       res.status(501).json({
         errorCode: 'ADMIN_SDK_UNCONFIGURED',
         authSynced: false,
@@ -1426,7 +1465,7 @@ export function createApp() {
     }
 
     try {
-      const adminAuth = getAuth(adminApp);
+      const adminAuth = adminCtx.getAuth(adminCtx.app);
       const authUpdate: UpdateRequest = {};
       if (typeof name === 'string' && name.trim()) authUpdate.displayName = name.trim();
       if (typeof email === 'string' && email.trim()) authUpdate.email = email.trim();
@@ -1458,7 +1497,8 @@ export function createApp() {
 
   app.post('/api/admin/users/:uid/activation-link', requireAuth, requireAdmin, async (req: AuthedRequest, res: Response) => {
     const { email } = req.body || {};
-    if (!adminSdkReady || !adminApp || !email) {
+    const adminCtx = await getFirebaseAdminContext();
+    if (!adminCtx || !email) {
       res.status(501).json({
         errorCode: 'ADMIN_SDK_UNCONFIGURED',
         error: '需設定 FIREBASE_SERVICE_ACCOUNT_JSON 才能產生真實密碼重設/啟用連結。',
@@ -1467,7 +1507,7 @@ export function createApp() {
     }
 
     try {
-      const link = await getAuth(adminApp).generatePasswordResetLink(String(email).trim());
+      const link = await adminCtx.getAuth(adminCtx.app).generatePasswordResetLink(String(email).trim());
       res.json({ ok: true, activationLink: link });
     } catch (err: any) {
       res.status(400).json({ error: err?.message || '無法產生安全啟用連結' });
@@ -1481,7 +1521,8 @@ export function createApp() {
       return;
     }
 
-    if (!adminSdkReady || !adminApp) {
+    const adminCtx = await getFirebaseAdminContext();
+    if (!adminCtx) {
       res.status(501).json({
         errorCode: 'ADMIN_SDK_UNCONFIGURED',
         authSynced: false,
@@ -1491,7 +1532,7 @@ export function createApp() {
     }
 
     try {
-      await getAuth(adminApp).deleteUser(uid);
+      await adminCtx.getAuth(adminCtx.app).deleteUser(uid);
       res.json({ ok: true, authSynced: true });
     } catch (err: any) {
       // If user already doesn't exist in Auth, still succeed so Firestore cleanup can proceed
